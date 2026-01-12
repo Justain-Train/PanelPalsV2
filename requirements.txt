@@ -1,0 +1,30 @@
+# FastAPI Backend Dependencies
+# Section 5: Backend Architecture (FastAPI – Python)
+
+# Web Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+pydantic==2.5.3
+pydantic-settings==2.1.0
+python-multipart==0.0.6  # For file uploads
+
+# Google Vision API (Section 6: OCR Pipeline)
+google-cloud-vision==3.7.0
+
+# ElevenLabs TTS (Section 8: Text-to-Speech)
+elevenlabs==0.2.27
+
+# Audio Processing (Section 9: Audio Stitching)
+scipy==1.15.1
+numpy==2.2.4
+
+# Security & Utilities
+python-dotenv==1.0.0
+slowapi==0.1.9  # Rate limiting
+
+# Testing (Section 14: Testing Strategy)
+pytest==7.4.4
+pytest-asyncio==0.23.3
+pytest-cov==4.1.0
+httpx==0.26.0  # For TestClient
+pytest-mock==3.12.0

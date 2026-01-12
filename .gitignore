@@ -1,0 +1,72 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+
+#markdown extensions
+.mdx_cache/
+.mdx_temp/
+.mdx_build/
+*.md
+
+#png
+*.png
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# Environment Variables
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.cover
+.hypothesis/
+
+# FastAPI
+*.log
+
+# Google Cloud
+*.json
+!package.json
+!package-lock.json
+
+# Audio files (generated)
+*.wav
+*.mp3
+
+# macOS
+.DS_Store
+
+# Node (frontend - separate repo, but ignore if present)
+node_modules/
