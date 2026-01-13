@@ -31,16 +31,18 @@ class AudioStitcher:
     - Maintain original reading order
     """
     
-    def __init__(self, pause_duration_ms: Optional[int] = None):
+    def __init__(self, pause_duration_ms: Optional[int] = None, output_format: Optional[str] = None):
         """
         Initialize audio stitcher.
         
         Args:
             pause_duration_ms: Pause duration between clips in milliseconds
+            output_format: Output format (currently only 'mp3' supported)
         """
         self.pause_duration_ms = pause_duration_ms or settings.AUDIO_PAUSE_DURATION_MS
-        logger.info(f"AudioStitcher initialized with {self.pause_duration_ms}ms pause")
-    
+        self.output_format = output_format or settings.AUDIO_OUTPUT_FORMAT
+        logger.info(f"AudioStitcher initialized with {self.pause_duration_ms}ms pause and {self.output_format} format")
+
     def stitch_audio_clips(
         self,
         tts_results: List[TTSResult],
@@ -97,7 +99,7 @@ class AudioStitcher:
         
         # Export to MP3 bytes
         output_buffer = io.BytesIO()
-        combined_audio.export(output_buffer, format="mp3")
+        combined_audio.export(output_buffer, format=output_format)
         output_bytes = output_buffer.getvalue()
         
         duration_seconds = len(combined_audio) / 1000.0  # pydub duration is in milliseconds

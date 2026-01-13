@@ -98,9 +98,11 @@ class TextBubbleGrouper:
         
         # Same line words (>50% vertical overlap)
         if vertical_overlap_ratio > 0.5:
-            # For same-line words, use STRICT horizontal proximity
-            # This prevents merging side-by-side bubbles
-            max_horizontal_gap = 60  # Reduced from 80 to be more conservative
+            # For same-line words, use VERY STRICT horizontal proximity
+            # This prevents merging side-by-side bubbles on the same horizontal level
+            # Use word width as reference - words in same bubble are typically close
+            avg_width = (bbox1.width + bbox2.width) / 2
+            max_horizontal_gap = min(40, avg_width * 0.8)  # Cap at 40px or 80% of avg word width
             return horizontal_gap < max_horizontal_gap
         
         # Different lines - check if vertically adjacent
@@ -174,6 +176,62 @@ class TextBubbleGrouper:
         
         logger.info(f"Clustered {n} words into {len(clusters)} bubbles using spatial proximity")
         return clusters
+    
+    def _split_wide_bubbles(self, clusters: List[List[OCRResult]]) -> List[List[OCRResult]]:
+        """
+        Split bubbles that are unreasonably wide (likely multiple bubbles merged).
+        
+        Args:
+            clusters: List of word clusters
+            
+        Returns:
+            List of clusters with wide ones split
+        """
+        result = []
+        MAX_BUBBLE_WIDTH = 700  # Normal speech bubbles are rarely wider than this
+        
+        for cluster in clusters:
+            if not cluster:
+                continue
+            
+            # Calculate bubble width
+            boxes = [word.bounding_box for word in cluster]
+            merged_bbox = self._merge_bounding_boxes(boxes)
+            
+            if merged_bbox.width <= MAX_BUBBLE_WIDTH:
+                # Normal width - keep as is
+                result.append(cluster)
+            else:
+                # Too wide - likely multiple bubbles, split by horizontal gaps
+                logger.info(
+                    f"Splitting wide bubble ({merged_bbox.width}px, {len(cluster)} words)"
+                )
+                
+                # Sort words left-to-right
+                sorted_words = sorted(cluster, key=lambda w: w.bounding_box.left)
+                
+                # Split when there's a large horizontal gap
+                sub_clusters = []
+                current_cluster = [sorted_words[0]]
+                
+                for i in range(1, len(sorted_words)):
+                    prev = sorted_words[i-1]
+                    curr = sorted_words[i]
+                    gap = curr.bounding_box.left - prev.bounding_box.right
+                    
+                    # Gap > 100px = likely different bubbles
+                    if gap > 100:
+                        logger.info(f"  Split at gap of {gap}px")
+                        sub_clusters.append(current_cluster)
+                        current_cluster = [curr]
+                    else:
+                        current_cluster.append(curr)
+                
+                sub_clusters.append(current_cluster)
+                logger.info(f"  Split into {len(sub_clusters)} bubbles")
+                result.extend(sub_clusters)
+        
+        return result
     
     def _merge_bounding_boxes(self, boxes: List[BoundingBox]) -> BoundingBox:
         """
@@ -295,6 +353,9 @@ class TextBubbleGrouper:
         
         # Step 1: Cluster words into bubbles using spatial proximity
         bubble_clusters = self._cluster_words_into_bubbles(ocr_results)
+        
+        # Step 1.5: Split bubbles that are too wide (multiple bubbles merged)
+        bubble_clusters = self._split_wide_bubbles(bubble_clusters)
         
         # Step 2: Create TextBubble objects from clusters
         bubbles = []

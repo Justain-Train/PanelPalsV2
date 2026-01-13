@@ -47,12 +47,12 @@ class Settings(BaseSettings):
     
     # Audio Processing (Section 9: Audio Stitching)
     AUDIO_PAUSE_DURATION_MS: int = Field(
-        default=500,
+        default=700,
         description="Pause duration between text bubbles in milliseconds"
     )
     AUDIO_OUTPUT_FORMAT: str = Field(
         default="mp3",
-        description="Output audio format (changed from WAV to MP3)"
+        description="Output audio format"
     )
     AUDIO_SAMPLE_RATE: int = Field(
         default=44100,

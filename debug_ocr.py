@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from backend.services.vision import GoogleVisionOCRService
 from backend.services.text_grouping import TextBubbleGrouper
+from backend.services.text_box_classifier import TextBoxClassifier
 
 def debug_ocr(image_path: str):
     """Debug OCR detection and text grouping"""
@@ -105,6 +106,17 @@ def debug_ocr(image_path: str):
         print("  2. Text grouping parameters need adjustment")
         print("  3. Image contains more text than expected")
 
+
+    text_classifier = TextBoxClassifier()
+
+
+    
+
+
+
+
+    
+
 if __name__ == "__main__":
-    image_path = sys.argv[1] if len(sys.argv) > 1 else "webtoonScreenshot4.png"
+    image_path = "Test2.png"  
     debug_ocr(image_path)

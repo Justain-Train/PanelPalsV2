@@ -13,6 +13,7 @@ import logging
 import asyncio
 import io
 from typing import List, Optional
+from PIL import Image
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
@@ -21,8 +22,10 @@ from backend.config import settings
 from backend.services import (
     GoogleVisionOCRService,
     TextBubbleGrouper,
+    TextBoxClassifier,
     ElevenLabsTTSService,
-    AudioStitcher
+    AudioStitcher,
+    BubbleContinuationDetector
 )
 
 logger = logging.getLogger(__name__)
@@ -52,6 +55,8 @@ class ProcessingError(BaseModel):
 # Service initialization (lazy loaded on first request)
 _ocr_service: Optional[GoogleVisionOCRService] = None
 _text_grouper: Optional[TextBubbleGrouper] = None
+_text_box_classifier: Optional[TextBoxClassifier] = None
+_continuation_detector: Optional[BubbleContinuationDetector] = None
 _tts_service: Optional[ElevenLabsTTSService] = None
 _audio_stitcher: Optional[AudioStitcher] = None
 
@@ -72,6 +77,24 @@ def get_text_grouper() -> TextBubbleGrouper:
         _text_grouper = TextBubbleGrouper()
         logger.info("Initialized text bubble grouper")
     return _text_grouper
+
+
+def get_text_box_classifier() -> TextBoxClassifier:
+    """Lazy load text box classifier."""
+    global _text_box_classifier
+    if _text_box_classifier is None:
+        _text_box_classifier = TextBoxClassifier()
+        logger.info("Initialized text box classifier")
+    return _text_box_classifier
+
+
+def get_continuation_detector() -> BubbleContinuationDetector:
+    """Lazy load bubble continuation detector."""
+    global _continuation_detector
+    if _continuation_detector is None:
+        _continuation_detector = BubbleContinuationDetector()
+        logger.info("Initialized bubble continuation detector")
+    return _continuation_detector
 
 
 def get_tts_service() -> ElevenLabsTTSService:
@@ -119,7 +142,6 @@ def preprocess_text(text: str) -> str:
     
     # Remove common OCR artifacts
     text = text.replace('|', 'I')  # Common OCR error
-    text = text.replace('0', 'O')  # In dialogue context, 0 is often O
     
     # Ensure proper sentence ending
     if text and not text[-1] in '.!?':
@@ -155,7 +177,7 @@ async def process_chapter(
     4. Preprocess text for TTS
     5. Generate TTS audio in parallel
     6. Stitch audio with pauses
-    7. Return WAV file
+    7. Return MP3 file
     
     Args:
         chapter_id: Unique identifier for the chapter
@@ -163,7 +185,7 @@ async def process_chapter(
         voice_id: Optional custom voice ID (uses default if not provided)
         
     Returns:
-        StreamingResponse with WAV audio file
+        StreamingResponse with MP3 audio file
         
     Raises:
         HTTPException: 400 for invalid input, 503 for unconfigured services
@@ -177,16 +199,18 @@ async def process_chapter(
             detail="No images provided"
         )
     
-    if len(images) > 100:  # Reasonable limit for a chapter
+    if len(images) > 150:  # Reasonable limit for a chapter
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Too many images: {len(images)}. Maximum is 100 per chapter."
+            detail=f"Too many images: {len(images)}. Maximum is 150 per chapter."
         )
     
     try:
         # Initialize services
         ocr_service = get_ocr_service()
+        text_box_classifier = get_text_box_classifier()
         text_grouper = get_text_grouper()
+        continuation_detector = get_continuation_detector()
         tts_service = get_tts_service()
         audio_stitcher = get_audio_stitcher()
         
@@ -206,6 +230,7 @@ async def process_chapter(
         # Step 2: Read and validate images
         logger.info(f"Reading {len(images)} images for chapter {chapter_id}")
         image_bytes_list = []
+        image_heights = []
         for idx, image_file in enumerate(images):
             try:
                 image_bytes = await image_file.read()
@@ -215,6 +240,11 @@ async def process_chapter(
                         detail=f"Image {idx} is empty"
                     )
                 image_bytes_list.append(image_bytes)
+                
+                # Extract image height for continuation detection
+                img = Image.open(io.BytesIO(image_bytes))
+                image_heights.append(img.height)
+                
             except Exception as e:
                 logger.error(f"Failed to read image {idx}: {e}")
                 raise HTTPException(
@@ -242,28 +272,72 @@ async def process_chapter(
         
         # Step 4: Group text bubbles per image to maintain reading order
         logger.info(f"Detected text in {len(ocr_results)} images")
-        all_text_bubbles = []
+        bubble_groups = []  # List of bubble lists (one per image)
         
         for image_idx, image_ocr_results in enumerate(ocr_results):
             if not image_ocr_results:
                 logger.warning(f"No text detected in image {image_idx}")
+                bubble_groups.append([])  # Empty group for this image
                 continue
             
             logger.info(f"Grouping {len(image_ocr_results)} OCR results from image {image_idx}")
             try:
                 image_bubbles = text_grouper.group_into_bubbles(image_ocr_results)
                 logger.info(f"Formed {len(image_bubbles)} text bubbles from image {image_idx}")
-                # Add bubbles in order
-                all_text_bubbles.extend(image_bubbles)
+                bubble_groups.append(image_bubbles)
             except Exception as e:
                 logger.error(f"Text grouping failed for image {image_idx}: {e}")
-                # Continue with other images
+                bubble_groups.append([])  # Empty group on error
                 continue
         
-        logger.info(f"Total text bubbles across all images: {len(all_text_bubbles)}")
+        logger.info(
+            f"Grouped text into {len(bubble_groups)} image groups, "
+            f"total {sum(len(g) for g in bubble_groups)} bubbles before continuation detection"
+        )
         
-        # Step 5: Use the combined text bubbles
-        text_bubbles = all_text_bubbles
+        # Step 4.5: Filter text bubbles (remove background text like sound effects)
+        logger.info("Classifying text bubbles (dialogue vs background)")
+        filtered_bubble_groups = []
+        text_box_classifier = get_text_box_classifier()
+        
+        for image_idx, image_bubbles in enumerate(bubble_groups):
+            if not image_bubbles:
+                filtered_bubble_groups.append([])
+                continue
+            
+            # Get image dimensions for classification
+            img = Image.open(io.BytesIO(image_bytes_list[image_idx]))
+            image_width, image_height = img.size
+            
+            # Filter to only dialogue/narration bubbles
+            filtered_bubbles = text_box_classifier.filter_text_bubbles(
+                image_bubbles,
+                image_width,
+                image_height
+            )
+            
+            filtered_bubble_groups.append(filtered_bubbles)
+            logger.info(
+                f"Image {image_idx}: {len(image_bubbles)} bubbles → "
+                f"{len(filtered_bubbles)} dialogue (filtered {len(image_bubbles) - len(filtered_bubbles)} background)"
+            )
+        
+        # Use filtered bubble groups
+        bubble_groups = filtered_bubble_groups
+
+        # Step 5: Detect and merge bubble continuations across images
+        logger.info("Detecting bubble continuations across images")
+
+
+        try:
+            logger.info("Heights of Images: " + ", ".join(str(h) for h in image_heights))
+            text_bubbles = continuation_detector.detect_and_merge_continuations(bubble_groups, image_heights)
+        except Exception as e:
+            logger.error(f"Bubble continuation detection failed: {e}")
+            # Fall back to simple concatenation
+            text_bubbles = []
+            for group in bubble_groups:
+                text_bubbles.extend(group)
         
         if not text_bubbles:
             logger.warning(f"No text bubbles formed for chapter {chapter_id}")
@@ -278,6 +352,7 @@ async def process_chapter(
         logger.info("Preprocessing text for TTS")
         preprocessed_texts = []
         for bubble in text_bubbles:
+
             preprocessed = preprocess_text(bubble.text)
             if preprocessed:  # Only include non-empty text
                 preprocessed_texts.append(preprocessed)

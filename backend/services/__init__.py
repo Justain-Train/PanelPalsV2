@@ -17,6 +17,12 @@ from backend.services.text_grouping import (
     TextBubble
 )
 
+# Text Box Classification Service
+from backend.services.text_box_classifier import (
+    TextBoxClassifier,
+    ClassificationResult
+)
+
 # TTS Service
 from backend.services.tts import (
     ElevenLabsTTSService,
@@ -28,6 +34,12 @@ from backend.services.audio import (
     AudioStitcher
 )
 
+# Bubble Continuation Detection Service
+from backend.services.bubble_continuation import (
+    BubbleContinuationDetector,
+    ContinuationMatch
+)
+
 __all__ = [
     'GoogleVisionOCRService',
     'BoundingBox',
@@ -37,4 +49,6 @@ __all__ = [
     'ElevenLabsTTSService',
     'TTSResult',
     'AudioStitcher',
+    'BubbleContinuationDetector',
+    'ContinuationMatch',
 ]
