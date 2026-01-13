@@ -146,12 +146,8 @@ See `.env.example` for all available configuration options. Key settings:
 
 ## Next Steps
 
-The skeleton is ready. Next implementations:
-1. OCR endpoint (`POST /ocr/process`)
-2. Text bubble grouping algorithm
-3. TTS integration
-4. Audio stitching engine
+The OCR Preprocessing and Text Bubble Grouping is ready. Next implementations:
+1. Cleaning up bugs and edge cases
+2. Classifying Dialogue and Background noise
 
----
 
-**Instruction File**: See `.github/copilot-instructions.md` for complete project specification.
