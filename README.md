@@ -16,7 +16,7 @@ External Client (Frontend) → FastAPI Backend → Google Vision API (OCR)
                                               ↓
                                          Audio Stitching
                                               ↓
-                                         WAV File Output
+                                         MP3 File Output
 ```
 
 ## Setup

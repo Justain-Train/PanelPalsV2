@@ -43,13 +43,13 @@ class TextBoxClassifier:
     
     def __init__(
         self,
-        classification_threshold: float = 0.65,  # Tuned for bubble-level classification
+        classification_threshold: float = 0.60,  # Tuned for bubble-level classification
         # Feature weights (must sum to 1.0)
-        weight_bbox_area: float = 0.35,    # Reduced - size alone not enough
-        weight_word_count: float = 0.25,   # Increased - strongest discriminator
+        weight_bbox_area: float = 0.30,     
+        weight_word_count: float = 0.20,   
         weight_text_density: float = 0.20,
-        weight_aspect_ratio: float = 0.10, # Reduced
-        weight_punctuation: float = 0.10
+        weight_aspect_ratio: float = 0.10, 
+        weight_punctuation: float = 0.20
     ):
         """
         Initialize text box classifier.
@@ -204,14 +204,14 @@ class TextBoxClassifier:
         elif 0.008 <= bbox_area_ratio <= 0.06:
             # Optimal range (0.8-6%) - typical dialogue boxes
             bbox_area_score = 1.0
-        elif 0.06 < bbox_area_ratio <= 0.12:
+        elif 0.06 < bbox_area_ratio <= 0.13:
             # Large (6-12%) - could be dialogue but suspicious
             bbox_area_score = 0.5
-        elif bbox_area_ratio > 0.12:
+        elif bbox_area_ratio > 0.13:
             # Very large (>12%) - likely decorative/background text
-            bbox_area_score = 0.1
+            bbox_area_score = 0.2
         else:
-            bbox_area_score = 0.3
+            bbox_area_score = 0.4
         
         # 2. Word count (discriminator - but not too harsh)
         words = text.split()
@@ -235,9 +235,13 @@ class TextBoxClassifier:
                 word_count_score = 0.1  # Penalize UI patterns
             else:
                 word_count_score = 0.5
-        elif word_count == 6:
+        elif word_count == 3:
+            word_count_score = 0.6
+        elif word_count == 4:
+            word_count_score = 0.65
+        elif word_count == 5:
             word_count_score = 0.7
-        elif word_count >= 7:
+        elif word_count >= 9:
             if has_ui_keyword:
                 word_count_score = 0.4  # Even long text with UI keywords suspicious
             else:
@@ -270,9 +274,9 @@ class TextBoxClassifier:
         # Dialogue boxes typically 2:1 to 4:1 (wider than tall)
         if 2.0 <= aspect_ratio <= 5.0:
             aspect_ratio_score = 1.0
-        elif 1.0 <= aspect_ratio < 2.0:
+        elif 1.0 <= aspect_ratio < 6.0:
             aspect_ratio_score = 0.7  # Slightly square is ok
-        elif 5.0 < aspect_ratio <= 8.0:
+        elif 6.0 < aspect_ratio <= 8.0:
             aspect_ratio_score = 0.5  # Very wide
         else:
             aspect_ratio_score = 0.3  # Extreme aspect ratio

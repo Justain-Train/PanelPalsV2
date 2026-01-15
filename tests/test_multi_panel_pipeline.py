@@ -10,9 +10,7 @@ API_URL = "http://localhost:8000/process/chapter"
 CHAPTER_ID = "webtoon_full_chapter"
 
 # Image files
-image_files = [
-   "Test2.png"
-]
+image_files = [f"images/{i}.png" for i in range(1, 25)]
 
 print(f"📸 Testing pipeline with {len(image_files)} panels")
 print(f"📦 Chapter ID: {CHAPTER_ID}")

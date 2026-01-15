@@ -107,16 +107,12 @@ def debug_ocr(image_path: str):
         print("  3. Image contains more text than expected")
 
 
-    text_classifier = TextBoxClassifier()
-
 
     
 
 
 
-
-    
 
 if __name__ == "__main__":
-    image_path = "Test2.png"  
+    image_path = "images/Test2.png"
     debug_ocr(image_path)

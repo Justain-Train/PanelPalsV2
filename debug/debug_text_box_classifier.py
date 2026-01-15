@@ -14,7 +14,7 @@ from PIL import Image
 import os
 
 # Image to test
-IMAGE_PATH = "18.png"
+IMAGE_PATH = "images/18.png"
 
 print("=" * 70)
 print("TEXT BOX CLASSIFIER DEMO")
