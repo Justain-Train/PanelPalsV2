@@ -41,7 +41,7 @@ class ProcessChapterResponse(BaseModel):
     bubble_count: int = Field(..., description="Number of text bubbles processed")
     duration_ms: int = Field(..., description="Total audio duration in milliseconds")
     sample_rate: int = Field(..., description="Audio sample rate")
-    format: str = Field(default="wav", description="Audio format")
+    format: str = Field(default="mp3", description="Audio format")
 
 
 class ProcessingError(BaseModel):
@@ -137,15 +137,12 @@ def preprocess_text(text: str) -> str:
     text = " ".join(text.split())
     
     # Normalize quotation marks
+    
     text = text.replace('"', '"').replace('"', '"')
     text = text.replace("'", "'").replace("'", "'")
     
     # Remove common OCR artifacts
     text = text.replace('|', 'I')  # Common OCR error
-    
-    # Ensure proper sentence ending
-    if text and not text[-1] in '.!?':
-        text += '.'
     
     return text.strip()
 

@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: panelpals-backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount backend code for development (hot reload)
+      - ./backend:/app/backend
+      # Mount .env file
+      - ./.env:/app/.env:ro
+      # Mount Google Cloud credentials if using file-based auth
+      - ~/.config/gcloud:/root/.config/gcloud:ro
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GOOGLE_APPLICATION_CREDENTIALS=/root/.config/gcloud/application_default_credentials.json
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Optional: Redis for caching (if needed in future)
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: panelpals-redis
+  #   ports:
+  #     - "6379:6379"
+  #   restart: unless-stopped

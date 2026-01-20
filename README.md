@@ -21,6 +21,31 @@ External Client (Frontend) → FastAPI Backend → Google Vision API (OCR)
 
 ## Setup
 
+### Option 1: Docker (Recommended for Fast Startup)
+
+```bash
+# Quick start with Docker Compose
+docker-compose up -d --build
+
+# Backend will be available at http://localhost:8000
+# View logs: docker-compose logs -f backend
+# Stop: docker-compose down
+```
+
+**Or use the Makefile:**
+```bash
+make build    # Build images
+make up       # Start containers
+make logs     # View logs
+make down     # Stop containers
+make shell    # Open bash in container
+make test     # Run tests
+```
+
+See [DOCKER_SETUP.md](DOCKER_SETUP.md) for detailed Docker documentation.
+
+### Option 2: Local Development
+
 ### 1. Install Dependencies
 
 ```bash

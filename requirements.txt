@@ -2,11 +2,11 @@
 # Section 5: Backend Architecture (FastAPI – Python)
 
 # Web Framework
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-pydantic==2.5.3
-pydantic-settings==2.1.0
-python-multipart==0.0.6  # For file uploads
+fastapi==0.115.0
+uvicorn[standard]==0.32.1
+pydantic==2.10.5
+pydantic-settings==2.7.1
+python-multipart==0.0.20  # For file uploads
 
 # Google Vision API (Section 6: OCR Pipeline)
 google-cloud-vision==3.7.0
@@ -14,7 +14,12 @@ google-cloud-vision==3.7.0
 # ElevenLabs TTS (Section 8: Text-to-Speech)
 elevenlabs==0.2.27
 
+# Image Processing
+Pillow==11.1.0
+
 # Audio Processing (Section 9: Audio Stitching)
+pydub==0.25.1  # Audio manipulation
+audioop-lts==0.2.1  # Audio operations (Python 3.13+)
 scipy==1.15.1
 numpy==2.2.4
 
