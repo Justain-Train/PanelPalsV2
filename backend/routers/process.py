@@ -156,9 +156,8 @@ def preprocess_text(text: str) -> str:
 
 @router.post(
     "/chapter",
-    response_model=ProcessChapterResponse,
     responses={
-        200: {"description": "Chapter processed successfully, WAV file returned"},
+        200: {"description": "Chapter processed successfully, MP3 file returned", "content": {"audio/mpeg": {}}},
         400: {"model": ProcessingError, "description": "Invalid request"},
         500: {"model": ProcessingError, "description": "Processing failed"},
         503: {"model": ProcessingError, "description": "Service not configured"}
@@ -203,7 +202,7 @@ async def process_chapter(
             detail="No images provided"
         )
     
-    if len(images) > 150:  # Reasonable limit for a chapter
+    if len(images) > 500:  # Reasonable limit for a chapter
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Too many images: {len(images)}. Maximum is 150 per chapter."
@@ -217,6 +216,9 @@ async def process_chapter(
         continuation_detector = get_continuation_detector()
         tts_service = get_tts_service()
         audio_stitcher = get_audio_stitcher()
+        
+        # ML data collection is always enabled (integrated into TextBoxClassifier.__init__)
+        logger.info(f"🎓 ML data collection active: {text_box_classifier.ml_data_collector.output_dir}")
         
         # Check service configuration
         if not settings.GOOGLE_VISION_CONFIGURED:
@@ -307,7 +309,6 @@ async def process_chapter(
         # Step 4.5: Filter text bubbles (remove background text like sound effects)
         logger.info("Classifying text bubbles (dialogue vs background)")
         filtered_bubble_groups = []
-        text_box_classifier = get_text_box_classifier()
         
         for image_idx, image_bubbles in enumerate(bubble_groups):
             if not image_bubbles:
@@ -374,7 +375,7 @@ async def process_chapter(
         
         logger.info(f"Preprocessed {len(preprocessed_texts)} text bubbles")
         
-        """
+        
         # Step 7: Generate TTS audio in parallel
         logger.info(f"Generating TTS for {len(preprocessed_texts)} bubbles")
         try:
@@ -417,6 +418,22 @@ async def process_chapter(
             f"{len(mp3_bytes)} bytes"
         )
         
+        # Step 8.5: Save ML collected data (always enabled)
+        if text_box_classifier.collect_ml_data and text_box_classifier.ml_data_collector:
+            try:
+                csv_path = text_box_classifier.ml_data_collector.save()
+                if csv_path:
+                    stats = text_box_classifier.ml_data_collector.get_stats()
+                    logger.info(
+                        f"💾 ML data saved to: {csv_path}\n"
+                        f"   Total: {stats['total']}, "
+                        f"Dialogue: {stats['dialogue']}, "
+                        f"Background: {stats['background']}, "
+                        f"Needs review: {stats['needs_review']}"
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to save ML data: {e}")
+        
         # Step 9: Return MP3 file as streaming response
         return StreamingResponse(
             io.BytesIO(mp3_bytes),
@@ -430,7 +447,7 @@ async def process_chapter(
             }
         )
 
-        """
+    
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is

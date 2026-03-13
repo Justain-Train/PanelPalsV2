@@ -31,11 +31,6 @@ class Settings(BaseSettings):
         description="Max images per Vision API batch request"
     )
     
-    # ElevenLabs API (Section 8: Text-to-Speech)
-    ELEVENLABS_API_KEY: str = Field(
-        default="",
-        description="ElevenLabs API key"
-    )
     ELEVENLABS_VOICE_ID: str = Field(
         default="G17SuINrv2H9FC6nvetn",
         description="Default narrator voice ID for MVP"
@@ -95,7 +90,7 @@ class Settings(BaseSettings):
     def GOOGLE_VISION_CONFIGURED(self) -> bool:
         """Check if Google Vision API is configured."""
         return bool(self.GOOGLE_APPLICATION_CREDENTIALS and 
-                   os.path.exists(self.GOOGLE_APPLICATION_CREDENTIALS))
+                os.path.exists(self.GOOGLE_APPLICATION_CREDENTIALS))
     
     @property
     def ELEVENLABS_CONFIGURED(self) -> bool:

@@ -9,7 +9,7 @@ Uses multiple heuristic features with weighted scoring.
 """
 
 import logging
-from typing import List, Tuple, TYPE_CHECKING
+from typing import List, Tuple, Optional
 from dataclasses import dataclass
 
 from backend.services.vision import OCRResult
@@ -23,8 +23,10 @@ from backend.services.language_features import (
     handle_short_dialogue
 )
 
-if TYPE_CHECKING:
-    from backend.services.text_grouping import TextBubble
+
+from backend.services.text_grouping import TextBubble
+from backend.ml.data_collector import MLDataCollector
+
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +111,9 @@ class TextBoxClassifier:
         # Initialize text preprocessor
         self.preprocessor = TextPreprocessor()
         
+        # ML data collection (always enabled for training)
+        self.ml_data_collector = MLDataCollector()
+   
         logger.info(
             f"TextBoxClassifier initialized with language features: "
             f"threshold={classification_threshold}, weights={self.weights}"
@@ -154,6 +159,7 @@ class TextBoxClassifier:
         for ocr, features in zip(ocr_results, all_features):
             score = self._compute_score(features)
             is_text_box = score >= self.threshold
+            
             
             result = ClassificationResult(
                 ocr_result=ocr,
@@ -587,6 +593,22 @@ class TextBoxClassifier:
             
             score = self._compute_score(features)
             is_text_box = score >= self.threshold
+            
+            # Collect ML training data (always enabled)
+            if self.collect_ml_data and self.ml_data_collector:
+                self.ml_data_collector.collect_sample(
+                    text=bubble.text,
+                    features=features,
+                    score=score,
+                    bbox=bubble.bounding_box,
+                    panel_id=getattr(bubble, 'panel_id', None),
+                    metadata={
+                        'image_width': image_width,
+                        'image_height': image_height,
+                        'is_text_box': is_text_box,
+                        'threshold': self.threshold
+                    })
+                logger.debug(f"📊 Collected ML sample: '{bubble.text[:30]}' (score={score:.2f})")
             
             if is_text_box:
                 filtered_bubbles.append(bubble)
