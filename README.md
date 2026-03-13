@@ -174,5 +174,6 @@ See `.env.example` for all available configuration options. Key settings:
 The OCR Preprocessing and Text Bubble Grouping is ready. Next implementations:
 1. Cleaning up bugs and edge cases
 2. Classifying Dialogue and Background noise
+3. Training ML model to detect Dialogue and Background
 
 
