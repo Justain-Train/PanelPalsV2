@@ -40,6 +40,14 @@ from backend.services.bubble_continuation import (
     ContinuationMatch
 )
 
+# Text Preprocessing Service
+from backend.services.text_preprocessing import (
+    TextPreprocessor,
+    normalize_text,
+    preprocess_for_classification,
+    preprocess_for_tts
+)
+
 __all__ = [
     'GoogleVisionOCRService',
     'BoundingBox',
@@ -51,4 +59,10 @@ __all__ = [
     'AudioStitcher',
     'BubbleContinuationDetector',
     'ContinuationMatch',
+    'TextBoxClassifier',
+    'ClassificationResult',
+    'TextPreprocessor',
+    'normalize_text',
+    'preprocess_for_classification',
+    'preprocess_for_tts',
 ]

@@ -27,7 +27,7 @@ class Settings(BaseSettings):
         description="Path to Google Cloud credentials JSON"
     )
     GOOGLE_VISION_MAX_BATCH_SIZE: int = Field(
-        default=10,
+        default=16,   
         description="Max images per Vision API batch request"
     )
     
@@ -37,7 +37,7 @@ class Settings(BaseSettings):
         description="ElevenLabs API key"
     )
     ELEVENLABS_VOICE_ID: str = Field(
-        default="",
+        default="G17SuINrv2H9FC6nvetn",
         description="Default narrator voice ID for MVP"
     )
     ELEVENLABS_MAX_PARALLEL_REQUESTS: int = Field(

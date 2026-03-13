@@ -6,6 +6,7 @@ WORKDIR /app
 
 # Install system dependencies for audio processing and Google Cloud
 RUN apt-get update && apt-get install -y \
+    ffmpeg \
     libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 

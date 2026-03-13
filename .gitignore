@@ -70,3 +70,5 @@ htmlcov/
 
 # Node (frontend - separate repo, but ignore if present)
 node_modules/
+
+screenshots/

@@ -210,7 +210,6 @@ class GoogleVisionOCRService:
     def detect_text_batch(
         self, 
         images: List[bytes],
-        batch_size: Optional[int] = None
     ) -> List[List[OCRResult]]:
         """
         Detect text in multiple images.
@@ -234,7 +233,8 @@ class GoogleVisionOCRService:
             return []
         
         # Use configured batch size
-        batch_size = batch_size or settings.GOOGLE_VISION_MAX_BATCH_SIZE
+        batch_size = settings.GOOGLE_VISION_MAX_BATCH_SIZE
+
         
         if batch_size <= 0:
             raise ValueError(f"Invalid batch size: {batch_size}")

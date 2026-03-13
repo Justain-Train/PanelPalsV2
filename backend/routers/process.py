@@ -1,6 +1,12 @@
 """
 Chapter Processing API Endpoint
 
+
+
+IMPORTANT for meeee (When implementing the  ML model auto-label should be 70% - 100% while background should be <45
+between should require my review )
+
+
 POST /process/chapter - Full OCR → TTS pipeline
 
 Section 4.1: API Design Principles
@@ -25,7 +31,8 @@ from backend.services import (
     TextBoxClassifier,
     ElevenLabsTTSService,
     AudioStitcher,
-    BubbleContinuationDetector
+    BubbleContinuationDetector,
+    TextPreprocessor
 )
 
 logger = logging.getLogger(__name__)
@@ -59,6 +66,7 @@ _text_box_classifier: Optional[TextBoxClassifier] = None
 _continuation_detector: Optional[BubbleContinuationDetector] = None
 _tts_service: Optional[ElevenLabsTTSService] = None
 _audio_stitcher: Optional[AudioStitcher] = None
+_text_preprocessor: Optional[TextPreprocessor] = None
 
 
 def get_ocr_service() -> GoogleVisionOCRService:
@@ -115,6 +123,15 @@ def get_audio_stitcher() -> AudioStitcher:
     return _audio_stitcher
 
 
+def get_text_preprocessor() -> TextPreprocessor:
+    """Lazy load text preprocessor."""
+    global _text_preprocessor
+    if _text_preprocessor is None:
+        _text_preprocessor = TextPreprocessor()
+        logger.info("Initialized text preprocessor")
+    return _text_preprocessor
+
+
 def preprocess_text(text: str) -> str:
     """
     Preprocess text before TTS.
@@ -133,18 +150,8 @@ def preprocess_text(text: str) -> str:
     if not text:
         return ""
     
-    # Remove extra whitespace
-    text = " ".join(text.split())
-    
-    # Normalize quotation marks
-    
-    text = text.replace('"', '"').replace('"', '"')
-    text = text.replace("'", "'").replace("'", "'")
-    
-    # Remove common OCR artifacts
-    text = text.replace('|', 'I')  # Common OCR error
-    
-    return text.strip()
+    preprocessor = get_text_preprocessor()
+    return preprocessor.preprocess_for_tts(text)
 
 
 @router.post(
@@ -223,6 +230,7 @@ async def process_chapter(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="ElevenLabs API not configured. Set ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID."
             )
+    
         
         # Step 2: Read and validate images
         logger.info(f"Reading {len(images)} images for chapter {chapter_id}")
@@ -273,17 +281,21 @@ async def process_chapter(
         
         for image_idx, image_ocr_results in enumerate(ocr_results):
             if not image_ocr_results:
-                logger.warning(f"No text detected in image {image_idx}")
+                logger.warning(f"No text detected in panel {image_idx}")
                 bubble_groups.append([])  # Empty group for this image
                 continue
             
-            logger.info(f"Grouping {len(image_ocr_results)} OCR results from image {image_idx}")
+            logger.info(f"Grouping {len(image_ocr_results)} OCR results from panel {image_idx}")
             try:
-                image_bubbles = text_grouper.group_into_bubbles(image_ocr_results)
-                logger.info(f"Formed {len(image_bubbles)} text bubbles from image {image_idx}")
+                # NEW: Pass panel_id to prevent cross-panel grouping
+                image_bubbles = text_grouper.group_into_bubbles(
+                    image_ocr_results,
+                    panel_id=image_idx
+                )
+                logger.info(f"Formed {len(image_bubbles)} text bubbles from panel {image_idx}")
                 bubble_groups.append(image_bubbles)
             except Exception as e:
-                logger.error(f"Text grouping failed for image {image_idx}: {e}")
+                logger.error(f"Text grouping failed for panel {image_idx}: {e}")
                 bubble_groups.append([])  # Empty group on error
                 continue
         
@@ -315,7 +327,7 @@ async def process_chapter(
             
             filtered_bubble_groups.append(filtered_bubbles)
             logger.info(
-                f"Image {image_idx}: {len(image_bubbles)} bubbles → "
+                f"Panel {image_idx}: {len(image_bubbles)} bubbles → "
                 f"{len(filtered_bubbles)} dialogue (filtered {len(image_bubbles) - len(filtered_bubbles)} background)"
             )
         
@@ -362,12 +374,13 @@ async def process_chapter(
         
         logger.info(f"Preprocessed {len(preprocessed_texts)} text bubbles")
         
+        """
         # Step 7: Generate TTS audio in parallel
         logger.info(f"Generating TTS for {len(preprocessed_texts)} bubbles")
         try:
             tts_results = await tts_service.generate_speech_batch(
                 preprocessed_texts,
-                voice_id=voice_id
+                voice_id = "onwK4e9ZLuTAKqWW03F9"
             )
         except Exception as e:
             logger.error(f"TTS generation failed for chapter {chapter_id}: {e}")
@@ -416,6 +429,8 @@ async def process_chapter(
                 "X-Format": "mp3"
             }
         )
+
+        """
         
     except HTTPException:
         # Re-raise HTTP exceptions as-is

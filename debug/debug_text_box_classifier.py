@@ -11,10 +11,9 @@ from backend.services.text_box_classifier import TextBoxClassifier
 from backend.services.text_grouping import TextBubbleGrouper
 from backend.services.vision import GoogleVisionOCRService
 from PIL import Image
-import os
 
 # Image to test
-IMAGE_PATH = "images/18.png"
+IMAGE_PATH = "images/Test4.png"
 
 print("=" * 70)
 print("TEXT BOX CLASSIFIER DEMO")

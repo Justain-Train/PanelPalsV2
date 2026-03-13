@@ -386,7 +386,7 @@ class BubbleContinuationDetector:
                 for prev_idx, prev_bubble in prev_image_bubbles:
                     prev_bbox = prev_bubble.bounding_box
                     logger.info(
-                        f"  Prev bubble[{prev_idx}]: \"{prev_bubble.text}\" "
+                        f"  Prev bubble[{prev_idx}]: \"{prev_bubble.text}\" panel_id={prev_bubble.panel_id} "
                         f"bbox=(top:{prev_bbox.top}, bottom:{prev_bbox.bottom}, left:{prev_bbox.left}, right:{prev_bbox.right})"
                     )
                     
@@ -396,9 +396,20 @@ class BubbleContinuationDetector:
                             logger.info(f"    Curr bubble[{curr_idx}] already merged, skipping")
                             continue
                         
+                        # CRITICAL: Prevent cross-panel merging if panels are not adjacent
+                        if prev_bubble.panel_id >= 0 and curr_bubble.panel_id >= 0:
+                            panel_distance = abs(curr_bubble.panel_id - prev_bubble.panel_id)
+                            if panel_distance > 1:
+                                logger.warning(
+                                    f"    PREVENTED cross-panel merge: "
+                                    f"Panel {prev_bubble.panel_id} → Panel {curr_bubble.panel_id} "
+                                    f"(distance={panel_distance} panels apart)"
+                                )
+                                continue
+                        
                         curr_bbox = curr_bubble.bounding_box
                         logger.info(
-                            f"    Checking curr bubble[{curr_idx}]: \"{curr_bubble.text}\" "
+                            f"    Checking curr bubble[{curr_idx}]: \"{curr_bubble.text}\" panel_id={curr_bubble.panel_id} "
                             f"bbox=(top:{curr_bbox.top}, bottom:{curr_bbox.bottom}, left:{curr_bbox.left}, right:{curr_bbox.right})"
                         )
                         
@@ -415,11 +426,13 @@ class BubbleContinuationDetector:
                             merged_ocr = prev_bubble.ocr_results + curr_bubble.ocr_results
                             
                             # Update the bubble in merged_bubbles
+                            # Keep the panel_id of the CURRENT bubble (where the text ends)
                             merged_bubbles[prev_idx] = TextBubble(
                                 text=merged_text,
                                 bounding_box=merged_bbox,
                                 ocr_results=merged_ocr,
-                                reading_order=prev_bubble.reading_order
+                                reading_order=prev_bubble.reading_order,
+                                panel_id=curr_bubble.panel_id  # NEW: Preserve panel_id
                             )
                             
                             # Mark this current bubble as merged
