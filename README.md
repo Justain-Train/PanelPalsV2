@@ -10,9 +10,13 @@ This is the **backend-only** implementation. The frontend (Chrome extension, Pup
 ```
 External Client (Frontend) → FastAPI Backend → Google Vision API (OCR)
                                               ↓
-                                         Text Bubble Grouping
+                                        Text Bubble Grouping
                                               ↓
-                                         ElevenLabs TTS (Parallel)
+                                        Text Preprocessor
+                                              ↓
+                                        Text Classifier (Background or Dialogue)
+                                             ↓
+                                        ElevenLabs TTS (Parallel)
                                               ↓
                                          Audio Stitching
                                               ↓
