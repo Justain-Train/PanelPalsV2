@@ -21,7 +21,7 @@ class Settings(BaseSettings):
         description="CORS allowed origins"
     )
     
-    # Google Vision API (Section 6: OCR Pipeline)
+    # Google Vision API
     GOOGLE_APPLICATION_CREDENTIALS: str = Field(
         default="",
         description="Path to Google Cloud credentials JSON"
@@ -40,7 +40,7 @@ class Settings(BaseSettings):
         description="Maximum parallel TTS requests to respect rate limits"
     )
     
-    # Audio Processing (Section 9: Audio Stitching)
+    # Audio Processing
     AUDIO_PAUSE_DURATION_MS: int = Field(
         default=700,
         description="Pause duration between text bubbles in milliseconds"
@@ -62,7 +62,7 @@ class Settings(BaseSettings):
         description="Total timeout for entire audio stitching operation in seconds"
     )
     
-    # Text Bubble Grouping (Section 6.1)
+    # Text Bubble Grouping
     BUBBLE_MAX_VERTICAL_GAP: int = Field(
         default=100,
         description="Maximum vertical gap (pixels) to group lines into same bubble"
@@ -72,7 +72,7 @@ class Settings(BaseSettings):
         description="Maximum horizontal center shift for same bubble"
     )
     
-    # Security & Rate Limiting (Section 5.2)
+    # Security & Rate Limiting
     MAX_IMAGE_SIZE_MB: int = Field(
         default=10,
         description="Maximum image upload size in megabytes"

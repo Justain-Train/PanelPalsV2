@@ -1,18 +1,7 @@
 """
 Chapter Processing API Endpoint
 
-
-
-IMPORTANT for meeee (When implementing the  ML model auto-label should be 70% - 100% while background should be <45
-between should require my review )
-
-
 POST /process/chapter - Full OCR → TTS pipeline
-
-Section 4.1: API Design Principles
-- RESTful endpoints
-- Stateless requests
-- Secure-by-default
 """
 
 import logging
@@ -133,20 +122,7 @@ def get_text_preprocessor() -> TextPreprocessor:
 
 
 def preprocess_text(text: str) -> str:
-    """
-    Preprocess text before TTS.
-    
-    Section 7: Text Preprocessing
-    - Clean OCR artifacts
-    - Normalize punctuation
-    - Fix common OCR errors
-    
-    Args:
-        text: Raw OCR text
-        
-    Returns:
-        Preprocessed text ready for TTS
-    """
+    """Preprocess raw OCR text for TTS."""
     if not text:
         return ""
     
@@ -171,31 +147,11 @@ async def process_chapter(
     voice_id: Optional[str] = Form(None, description="Custom voice ID (optional)")
 ) -> StreamingResponse:
     """
-    Process a complete Webtoon chapter through the full pipeline.
-    
-    Pipeline Steps:
-    1. Validate request and check service configuration
-    2. Perform OCR using Google Vision API
-    3. Group text into ordered text bubbles
-    4. Preprocess text for TTS
-    5. Generate TTS audio in parallel
-    6. Stitch audio with pauses
-    7. Return MP3 file
-    
-    Args:
-        chapter_id: Unique identifier for the chapter
-        images: List of chapter images in reading order
-        voice_id: Optional custom voice ID (uses default if not provided)
-        
-    Returns:
-        StreamingResponse with MP3 audio file
-        
-    Raises:
-        HTTPException: 400 for invalid input, 503 for unconfigured services
+    Process a complete Webtoon chapter through the full OCR → TTS pipeline.
+    Returns an MP3 audio file.
     """
     logger.info(f"Processing chapter {chapter_id} with {len(images)} images")
     
-    # Step 1: Validate request
     if not images:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -217,7 +173,6 @@ async def process_chapter(
         tts_service = get_tts_service()
         audio_stitcher = get_audio_stitcher()
         
-        # ML data collection is always enabled (integrated into TextBoxClassifier.__init__)
         logger.info(f"🎓 ML data collection active: {text_box_classifier.ml_data_collector.output_dir}")
         
         # Check service configuration
@@ -234,7 +189,6 @@ async def process_chapter(
             )
     
         
-        # Step 2: Read and validate images
         logger.info(f"Reading {len(images)} images for chapter {chapter_id}")
         image_bytes_list = []
         image_heights = []
@@ -259,7 +213,6 @@ async def process_chapter(
                     detail=f"Failed to read image {idx}: {str(e)}"
                 )
         
-        # Step 3: Perform OCR using Google Vision API
         logger.info(f"Performing OCR on {len(image_bytes_list)} images")
         try:
             ocr_results = ocr_service.detect_text_batch(image_bytes_list)
@@ -277,19 +230,17 @@ async def process_chapter(
                 detail="No text detected in images. Please verify images contain readable text."
             )
         
-        # Step 4: Group text bubbles per image to maintain reading order
         logger.info(f"Detected text in {len(ocr_results)} images")
-        bubble_groups = []  # List of bubble lists (one per image)
+        bubble_groups = []
         
         for image_idx, image_ocr_results in enumerate(ocr_results):
             if not image_ocr_results:
                 logger.warning(f"No text detected in panel {image_idx}")
-                bubble_groups.append([])  # Empty group for this image
+                bubble_groups.append([])
                 continue
             
             logger.info(f"Grouping {len(image_ocr_results)} OCR results from panel {image_idx}")
             try:
-                # NEW: Pass panel_id to prevent cross-panel grouping
                 image_bubbles = text_grouper.group_into_bubbles(
                     image_ocr_results,
                     panel_id=image_idx
@@ -298,7 +249,7 @@ async def process_chapter(
                 bubble_groups.append(image_bubbles)
             except Exception as e:
                 logger.error(f"Text grouping failed for panel {image_idx}: {e}")
-                bubble_groups.append([])  # Empty group on error
+                bubble_groups.append([])
                 continue
         
         logger.info(
@@ -306,7 +257,6 @@ async def process_chapter(
             f"total {sum(len(g) for g in bubble_groups)} bubbles before continuation detection"
         )
         
-        # Step 4.5: Filter text bubbles (remove background text like sound effects)
         logger.info("Classifying text bubbles (dialogue vs background)")
         filtered_bubble_groups = []
         
@@ -335,16 +285,13 @@ async def process_chapter(
         # Use filtered bubble groups
         bubble_groups = filtered_bubble_groups
 
-        # Step 5: Detect and merge bubble continuations across images
         logger.info("Detecting bubble continuations across images")
-
 
         try:
             logger.info("Heights of Images: " + ", ".join(str(h) for h in image_heights))
             text_bubbles = continuation_detector.detect_and_merge_continuations(bubble_groups, image_heights)
         except Exception as e:
             logger.error(f"Bubble continuation detection failed: {e}")
-            # Fall back to simple concatenation
             text_bubbles = []
             for group in bubble_groups:
                 text_bubbles.extend(group)
@@ -358,7 +305,6 @@ async def process_chapter(
         
         logger.info(f"Formed {len(text_bubbles)} text bubbles")
         
-        # Step 6: Preprocess text for TTS
         logger.info("Preprocessing text for TTS")
         preprocessed_texts = []
         for bubble in text_bubbles:
@@ -376,7 +322,6 @@ async def process_chapter(
         logger.info(f"Preprocessed {len(preprocessed_texts)} text bubbles")
         
         
-        # Step 7: Generate TTS audio in parallel
         logger.info(f"Generating TTS for {len(preprocessed_texts)} bubbles")
         try:
             tts_results = await tts_service.generate_speech_batch(
@@ -399,7 +344,6 @@ async def process_chapter(
         
         logger.info(f"Generated {len(tts_results)} audio clips")
         
-        # Step 8: Stitch audio with pauses
         logger.info("Stitching audio clips")
         try:
             mp3_bytes = audio_stitcher.stitch_audio_clips(tts_results, output_format="mp3")
@@ -418,7 +362,6 @@ async def process_chapter(
             f"{len(mp3_bytes)} bytes"
         )
         
-        # Step 8.5: Save ML collected data (always enabled)
         if text_box_classifier.collect_ml_data and text_box_classifier.ml_data_collector:
             try:
                 csv_path = text_box_classifier.ml_data_collector.save()
@@ -434,7 +377,6 @@ async def process_chapter(
             except Exception as e:
                 logger.warning(f"Failed to save ML data: {e}")
         
-        # Step 9: Return MP3 file as streaming response
         return StreamingResponse(
             io.BytesIO(mp3_bytes),
             media_type="audio/mpeg",
@@ -450,10 +392,8 @@ async def process_chapter(
     
         
     except HTTPException:
-        # Re-raise HTTP exceptions as-is
         raise
     except Exception as e:
-        # Catch-all for unexpected errors
         logger.error(f"Unexpected error processing chapter {chapter_id}: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

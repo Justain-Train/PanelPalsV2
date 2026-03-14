@@ -1,7 +1,6 @@
 """
 ML Dataset Preparation
 
-Section 14.1: Unit Tests
 Prepares labeled data for machine learning model training.
 
 Architecture:

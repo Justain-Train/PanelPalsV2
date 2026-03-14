@@ -141,7 +141,7 @@ class TextPreprocessor:
         # "End.Start" → "End. Start"
         text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
 
-        #11 get rid of * or common OCR misread
+        # 11. Remove asterisks
         text = re.sub(r'\*+', ' ', text)  # Replace multiple asterisks with space
         text = re.sub(r'(?<=[a-zA-Z])\*+(?=[a-zA-Z])', ' ', text)  # Replace asterisks between words
         
@@ -346,7 +346,7 @@ class TextPreprocessor:
         # Step 4: Remove excessive repetition (likely errors)
         text = self.remove_repeated_characters(text, max_repeats=2)
 
-        #step 5: Fix OCR corruptions like merged numbers/symbols
+        # Step 5: Fix OCR corruptions like merged numbers/symbols
         text = self.fix_ocr_corruptions(text)
         
         if text != original_text:
@@ -356,38 +356,19 @@ class TextPreprocessor:
     
     def preprocess_for_tts(self, text: str) -> str:
         """
-        Preprocess text AFTER classification, BEFORE TTS.
-        
-        Section 8.2: Text Normalization for TTS
-        Additional TTS-specific preprocessing.
-        
-        Pipeline:
-        1. Normalize text (already done in classification)
-        2. Handle numbers (convert to words if needed)
-        3. Expand abbreviations
-        4. Final cleanup
-        
+        Preprocess text before TTS.
+
         Args:
             text: Classified dialogue text
-            
+
         Returns:
             Text optimized for TTS
-            
-        Examples:
-            >>> preprocessor = TextPreprocessor()
-            >>> preprocessor.preprocess_for_tts("MEET ME @ 3PM")
-            "MEET ME at 3PM"
         """
         if not text or not text.strip():
             return ""
-        
-        # Already normalized during classification, but apply again for safety
+
         text = self.normalize_text(text)
-        
-        # Additional TTS-specific processing can go here
-        # For MVP, normalization is sufficient
-        # Future: number-to-word conversion, abbreviation expansion
-        
+
         logger.debug(f"Preprocessed for TTS: '{text}'")
         return text
     

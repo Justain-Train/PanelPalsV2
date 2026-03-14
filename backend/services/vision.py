@@ -132,20 +132,7 @@ class GoogleVisionOCRService:
         deadline=60.0
     )
     def _detect_text_with_retry(self, image: vision.Image) -> Any:
-        """
-        Call Vision API with retry logic.
-        
-        Section 6.1: Enable retries and fallbacks
-        
-        Args:
-            image: Vision API Image object
-            
-        Returns:
-            Vision API response
-            
-        Raises:
-            Exception: If API call fails after retries
-        """
+        """Call Vision API with exponential-backoff retry."""
         if self.client is None:
             raise ValueError("Google Vision API client not initialized")
         

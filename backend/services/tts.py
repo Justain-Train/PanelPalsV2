@@ -112,7 +112,7 @@ class ElevenLabsTTSService:
                         similarity_boost=0.75
                     )
                 ),
-                model="eleven_turbo_v2",  # Updated model for free tier compatibility
+                model="eleven_turbo_v2",
                 api_key=self.api_key
             )
             
@@ -150,7 +150,6 @@ class ElevenLabsTTSService:
         Returns:
             TTSResult with audio bytes
         """
-        # Run synchronous generate in executor to avoid blocking
         loop = asyncio.get_event_loop()
         return await loop.run_in_executor(
             None,
@@ -212,7 +211,6 @@ class ElevenLabsTTSService:
         for idx, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.error(f"Text {idx + 1} failed: {result}")
-                # Could implement retry logic here
             else:
                 valid_results.append(result)
         

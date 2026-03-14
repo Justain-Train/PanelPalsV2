@@ -1,7 +1,6 @@
 """
 ML Training Data Collector
 
-Section 14.1: Unit Tests
 Collects OCR region features and scores for machine learning model training.
 
 Architecture:

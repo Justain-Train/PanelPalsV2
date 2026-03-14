@@ -1,7 +1,6 @@
 """
 ML Model Training
 
-Section 14.1: Unit Tests
 Trains machine learning models for text box classification.
 
 Architecture:

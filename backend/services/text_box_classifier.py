@@ -146,21 +146,18 @@ class TextBoxClassifier:
         all_features = []
         for ocr in ocr_results:
             features = self._compute_features(ocr, image_area, ocr_results)
-            
+
             # Apply edge case handling for short dialogue
-            # This boosts scores for valid short exclamations like "NO", "WAIT!", etc.
             if len(ocr.text.split()) <= 2:
                 features = handle_short_dialogue(ocr.text, features)
-            
+
             all_features.append(features)
-        
-        # Classify each region
+
         results = []
         for ocr, features in zip(ocr_results, all_features):
             score = self._compute_score(features)
             is_text_box = score >= self.threshold
-            
-            
+
             result = ClassificationResult(
                 ocr_result=ocr,
                 is_text_box=is_text_box,
@@ -168,10 +165,8 @@ class TextBoxClassifier:
                 features=features
             )
             results.append(result)
-            
-            # Enhanced logging with feature breakdown
+
             if is_text_box:
-                # Log detailed features for accepted text (especially non-English)
                 logger.info(
                     f"✓ ACCEPTED as dialogue: '{ocr.text}' (score={score:.3f})\n"
                     f"  Spatial: bbox_area={features.get('bbox_area', 0):.2f}, "
@@ -355,23 +350,18 @@ class TextBoxClassifier:
         has_any_punct = any(p in text for p in '.!?,;:—-~')
         
         if has_ending_punct:
-            punctuation_score = 1.0  # Clear sentence ending
+            punctuation_score = 1.0
         elif has_any_punct:
-            punctuation_score = 0.6  # Has punctuation but not at end
+            punctuation_score = 0.6
         else:
-            punctuation_score = 0.2  # No punctuation - likely UI text or incomplete
-        
-        # ========================================================================
-        # TEXT PREPROCESSING FOR LANGUAGE FEATURES
-        # ========================================================================
-        # Clean OCR artifacts and normalize text before computing language features
-        # This improves accuracy by removing noise, fixing common OCR errors
+            punctuation_score = 0.2
+
+        # Preprocess text before computing language features
         preprocessed_text = self.preprocessor.preprocess_for_classification(text)
-        
-        # Debug: Log preprocessing changes
+
         if preprocessed_text != text:
             logger.debug(f"Preprocessed: '{text}' → '{preprocessed_text}'")
-        
+
         # Check if text is non-English (Korean, Japanese, Chinese, etc.)
         # Count non-ASCII characters
         non_ascii_count = sum(1 for c in preprocessed_text if ord(c) > 127)
@@ -384,12 +374,9 @@ class TextBoxClassifier:
                 f"({non_ascii_ratio*100:.0f}% non-ASCII chars) - "
                 f"Language features will score LOW"
             )
-        
-        # ========================================================================
-        # LANGUAGE-BASED FEATURES (NEW)
-        # ========================================================================
-        
-        # 6. Dictionary word ratio - filters gibberish and OCR errors
+
+        # Language features
+        # 6. Dictionary word ratio
         dict_ratio = compute_dictionary_ratio(preprocessed_text)
         
         # Normalize to [0, 1] with boosting for high values
@@ -437,13 +424,7 @@ class TextBoxClassifier:
         noise = compute_ocr_noise_score(preprocessed_text)
         ocr_noise_score = 1.0 - noise  # Invert: high score = clean text
         
-        # ========================================================================
-        # NON-ENGLISH DETECTION AND PENALTY
-        # ========================================================================
-        # If text is primarily non-English (Korean, Japanese, Chinese, etc.),
-        # apply a penalty since our language features are English-only
-        
-        # Count non-ASCII characters (Korean, Japanese, Chinese, etc.)
+        # Non-English penalty: force language scores to 0 if >50% non-ASCII
         non_ascii_count = sum(1 for c in text if ord(c) > 127)
         total_chars = len(text.replace(' ', ''))
         non_ascii_ratio = non_ascii_count / total_chars if total_chars > 0 else 0
@@ -455,17 +436,13 @@ class TextBoxClassifier:
                 f"Non-English text detected (should be filtered): '{text}' "
                 f"({non_ascii_ratio*100:.0f}% non-ASCII) - applying penalty"
             )
-            # Force language feature scores to 0 for non-English text
             dictionary_ratio_score = 0.0
             alphabet_ratio_score = 0.0
             word_frequency_score = 0.0
             trigram_score = 0.0
-            # Also penalize punctuation (Korean sound effects rarely have English punctuation)
             if not has_ending_punct:
                 punctuation_score = 0.0
-        
-        # ========================================================================
-        
+
         return {
             # Spatial features
             'bbox_area': bbox_area_score,
@@ -479,7 +456,7 @@ class TextBoxClassifier:
             'word_frequency': word_frequency_score,
             'trigram_score': trigram_score,
             'ocr_noise': ocr_noise_score,
-            # Raw values for debugging
+            # Raw values
             'raw_bbox_area': bbox_area,
             'raw_word_count': word_count,
             'raw_density': density,

@@ -1,7 +1,6 @@
 """
 Interactive ML Training Data Review Tool
 
-Section 14.1: Unit Tests
 Fast keyboard-driven interface for manually reviewing uncertain classification samples.
 
 Architecture:

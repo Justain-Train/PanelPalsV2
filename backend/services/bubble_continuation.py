@@ -1,26 +1,10 @@
 """
 Bubble Continuation Detection Service
 
-Handles text bubbles that span multiple images/panels in webtoon chapters.
-
-PROBLEM:
-When a single speech bubble is cut across two images:
-- Image N has the top part: "Hey, what are you"
-- Image N+1 has the bottom part: "doing over there?"
-
-They are currently treated as 2 separate bubbles, causing:
-1. Incorrect TTS output (two separate audio clips)
-2. Awkward pauses where there shouldn't be any
-
-SOLUTION:
-Detect when the last bubble of image N and first bubble of image N+1
-are likely continuations of the same bubble, then merge them.
-
-HEURISTICS:
-1. Vertical proximity: Bottom of bubble N close to top of image N+1
-2. Horizontal alignment: Similar horizontal position/width
-3. Text characteristics: Incomplete sentence in bubble N
-4. Bounding box similarity: Similar width suggests same bubble
+Detects and merges text bubbles that span multiple panels.
+When a speech bubble is split across two images, the last bubble of
+panel N and the first bubble of panel N+1 are merged if they match
+on vertical proximity, horizontal alignment, width, and text sentence continuity.
 """
 
 import logging
@@ -198,7 +182,7 @@ class BubbleContinuationDetector:
         prev_bbox = prev_bubble.bounding_box
         next_bbox = next_bubble.bounding_box
         
-        # CRITICAL: Check vertical proximity to image boundaries
+        # Check vertical proximity to image boundaries
         # prev_bubble should be near BOTTOM of prev image
         # next_bubble should be near TOP of next image (y=0)
         if prev_image_height is not None:
@@ -218,7 +202,6 @@ class BubbleContinuationDetector:
             
             # Both should be within max_vertical_gap of their respective edges
             if distance_from_bottom > self.max_vertical_gap or next_top > self.max_vertical_gap:
-                # Not at image boundaries - unlikely to be a split bubble
                 logger.debug(
                     f"        ❌ REJECTED: Not at boundaries "
                     f"(distance_from_bottom={distance_from_bottom}, next_top={next_top})"
@@ -266,13 +249,12 @@ class BubbleContinuationDetector:
             confidence += 0.3
             reasons.append("incomplete_sentence")
         
-        # CRITICAL: If prev bubble ends with sentence punctuation,
-        # require PERFECT alignment and width match to merge
+        # If prev bubble ends with sentence punctuation,
+        # require near-perfect alignment and width match to merge
         if ends_with_sentence_punct:
             logger.debug(f"        Sentence boundary detected (ends with: '{prev_text[-1]}')")
             # Require near-perfect metrics to override sentence boundary
             if horizontal_alignment < 0.95 or width_similarity < 0.9:
-                # Not confident enough to merge across sentence boundary
                 logger.debug(
                     f"        ❌ REJECTED: Sentence boundary with insufficient metrics "
                     f"(needs h_align≥0.95 AND w_sim≥0.9)"
@@ -314,17 +296,13 @@ class BubbleContinuationDetector:
             return []
         
         if len(bubble_groups) == 1:
-            # Single image - no continuations possible
             return bubble_groups[0]
         
         logger.info(f"Checking for bubble continuations across {len(bubble_groups)} images")
         
-        # Track merges
         merges_detected = 0
-        
-        # Build merged result
         merged_bubbles = []
-        last_image_idx = -1  # Track which image the last bubble came from
+        last_image_idx = -1
         
         for img_idx in range(len(bubble_groups)):
             current_bubbles = bubble_groups[img_idx]
@@ -396,7 +374,7 @@ class BubbleContinuationDetector:
                             logger.info(f"    Curr bubble[{curr_idx}] already merged, skipping")
                             continue
                         
-                        # CRITICAL: Prevent cross-panel merging if panels are not adjacent
+                        # Prevent cross-panel merging if panels are not adjacent
                         if prev_bubble.panel_id >= 0 and curr_bubble.panel_id >= 0:
                             panel_distance = abs(curr_bubble.panel_id - prev_bubble.panel_id)
                             if panel_distance > 1:
@@ -432,7 +410,7 @@ class BubbleContinuationDetector:
                                 bounding_box=merged_bbox,
                                 ocr_results=merged_ocr,
                                 reading_order=prev_bubble.reading_order,
-                                panel_id=curr_bubble.panel_id  # NEW: Preserve panel_id
+                                panel_id=curr_bubble.panel_id
                             )
                             
                             # Mark this current bubble as merged

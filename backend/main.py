@@ -30,12 +30,12 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None
 )
 
-# CORS Configuration (Section 5.2: Secure-by-default)
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "GET"],  # Restrictive: only needed methods
+    allow_methods=["POST", "GET"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -64,7 +64,7 @@ async def log_requests(request: Request, call_next):
 # Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
-    """Add security headers to all responses (Section 5.2)."""
+    """Add security headers to all responses."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
