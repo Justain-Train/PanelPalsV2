@@ -106,13 +106,13 @@ class ElevenLabsTTSService:
             audio_bytes = generate(
                 text=text,
                 voice=Voice(
-                    voice_id=voice_id,
+                    voice_id="NNl6r8mD7vthiJatiJt1",
                     settings=VoiceSettings(
                         stability=0.5,
                         similarity_boost=0.75
                     )
                 ),
-                model="eleven_turbo_v2",
+                model="eleven_v4_turbo",
                 api_key=self.api_key
             )
             

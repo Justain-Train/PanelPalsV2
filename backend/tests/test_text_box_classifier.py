@@ -6,9 +6,26 @@ Tests the classifier's ability to distinguish between:
 - Background text like sound effects, signs (should be filtered)
 """
 
+import json
+from types import SimpleNamespace
+
+import joblib
+import numpy as np
 import pytest
+from backend.config import settings
 from backend.services.text_box_classifier import TextBoxClassifier
 from backend.services import OCRResult, BoundingBox
+
+
+@pytest.fixture(autouse=True)
+def heuristic_by_default(monkeypatch, tmp_path):
+    """
+    Tests in this module exercise the heuristic unless they opt into a model
+    explicitly - so a local .env with CLASSIFIER_MODE=model or a trained
+    models/best_model.joblib doesn't change what they test.
+    """
+    monkeypatch.setattr(settings, "CLASSIFIER_MODE", "heuristic")
+    monkeypatch.setattr(settings, "ML_MODEL_PATH", str(tmp_path / "no_model.joblib"))
 
 
 def create_ocr_result(text: str, left: int, top: int, width: int, height: int) -> OCRResult:
@@ -854,3 +871,157 @@ class TestLanguageFeatures:
                 assert results[0].is_text_box is True, f"Dialogue '{text}' should be accepted"
             else:
                 assert results[0].is_text_box is False, f"Background '{text}' should be rejected"
+
+
+# ML model integration
+
+MODEL_FEATURES = ["feature_raw_has_any_punct", "feature_is_timestamp", "feature_word_count"]
+
+
+class FixedProbModel:
+    """Stand-in classifier returning a fixed P(dialogue) and recording its input."""
+
+    def __init__(self, prob, feature_names=MODEL_FEATURES, fail=False):
+        self.prob = prob
+        self.feature_names_in_ = np.array(feature_names)
+        self.n_features_in_ = len(feature_names)
+        self.n_jobs = -1
+        self.fail = fail
+        self.last_X = None
+
+    def predict_proba(self, X):
+        if self.fail:
+            raise RuntimeError("boom")
+        self.last_X = X
+        return np.array([[1 - self.prob, self.prob]] * len(X))
+
+
+def save_model(tmp_path, model, feature_names=MODEL_FEATURES):
+    """Write model + metadata the way train_model does; return the model path."""
+    path = tmp_path / "best_model.joblib"
+    joblib.dump(model, path)
+    (tmp_path / "model_metadata.json").write_text(
+        json.dumps({"best_model": "fixed", "feature_names": feature_names})
+    )
+    return str(path)
+
+
+def sound_effect():
+    # Rejected by the heuristic (single SFX word, no punctuation)
+    return create_ocr_result("SLAM", left=100, top=100, width=400, height=300)
+
+
+def dialogue():
+    # Accepted by the heuristic
+    return create_ocr_result("Where are you going right now?", left=100, top=500, width=300, height=60)
+
+
+@pytest.mark.unit
+class TestMLModelIntegration:
+
+    def test_model_mode_uses_model_probability(self, tmp_path):
+        """In model mode the model's probability decides, not the heuristic."""
+        keep_all = TextBoxClassifier(
+            mode="model", model_path=save_model(tmp_path, FixedProbModel(0.9)), model_threshold=0.4
+        )
+        result = keep_all.classify_regions([sound_effect()], 1400, 2000)[0]
+        assert result.is_text_box is True          # heuristic alone would reject it
+        assert result.model_prob == pytest.approx(0.9)
+        assert result.score < keep_all.threshold   # heuristic score still reported
+
+        drop_all = TextBoxClassifier(
+            mode="model", model_path=save_model(tmp_path, FixedProbModel(0.1)), model_threshold=0.4
+        )
+        assert drop_all.classify_regions([dialogue()], 1400, 2000)[0].is_text_box is False
+
+    def test_model_threshold_applies(self, tmp_path):
+        path = save_model(tmp_path, FixedProbModel(0.45))
+        assert TextBoxClassifier(mode="model", model_path=path, model_threshold=0.4) \
+            .classify_regions([dialogue()], 1400, 2000)[0].is_text_box is True
+        assert TextBoxClassifier(mode="model", model_path=path, model_threshold=0.5) \
+            .classify_regions([dialogue()], 1400, 2000)[0].is_text_box is False
+
+    def test_heuristic_mode_ignores_model_but_reports_probability(self, tmp_path):
+        """Heuristic mode decides by formula; the model still runs for comparison logging."""
+        classifier = TextBoxClassifier(
+            mode="heuristic", model_path=save_model(tmp_path, FixedProbModel(0.9))
+        )
+        result = classifier.classify_regions([sound_effect()], 1400, 2000)[0]
+        assert result.is_text_box is False
+        assert result.model_prob == pytest.approx(0.9)
+
+    def test_missing_model_falls_back_to_heuristic(self, tmp_path):
+        classifier = TextBoxClassifier(mode="model", model_path=str(tmp_path / "missing.joblib"))
+        assert classifier.model is None
+        results = classifier.classify_regions([sound_effect(), dialogue()], 1400, 2000)
+        assert [r.is_text_box for r in results] == [False, True]
+        assert all(r.model_prob is None for r in results)
+
+    def test_corrupt_model_falls_back_to_heuristic(self, tmp_path):
+        path = tmp_path / "best_model.joblib"
+        path.write_bytes(b"not a model")
+        (tmp_path / "model_metadata.json").write_text(json.dumps({"feature_names": MODEL_FEATURES}))
+        classifier = TextBoxClassifier(mode="model", model_path=str(path))
+        assert classifier.model is None
+        assert classifier.classify_regions([dialogue()], 1400, 2000)[0].is_text_box is True
+
+    def test_missing_metadata_falls_back_to_heuristic(self, tmp_path):
+        path = tmp_path / "best_model.joblib"
+        joblib.dump(FixedProbModel(0.1), path)
+        assert TextBoxClassifier(mode="model", model_path=str(path)).model is None
+
+    def test_feature_order_mismatch_falls_back_to_heuristic(self, tmp_path):
+        """Metadata listing features in a different order than the model was trained on is rejected."""
+        model = FixedProbModel(0.1, feature_names=list(reversed(MODEL_FEATURES)))
+        classifier = TextBoxClassifier(mode="model", model_path=save_model(tmp_path, model))
+        assert classifier.model is None
+
+    def test_prediction_error_falls_back_to_heuristic(self, tmp_path):
+        classifier = TextBoxClassifier(
+            mode="model", model_path=save_model(tmp_path, FixedProbModel(0.1, fail=True))
+        )
+        result = classifier.classify_regions([dialogue()], 1400, 2000)[0]
+        assert result.is_text_box is True
+        assert result.model_prob is None
+
+    def test_features_sent_in_metadata_order_with_training_conversions(self, tmp_path):
+        """Columns follow metadata order; booleans become 1/0 and missing features 0.0."""
+        classifier = TextBoxClassifier(mode="model", model_path=save_model(tmp_path, FixedProbModel(0.9)))
+        result = classifier.classify_regions([dialogue()], 1400, 2000)[0]
+
+        X = classifier.model.last_X
+        assert list(X.columns) == MODEL_FEATURES
+        row = X.iloc[0]
+        assert row["feature_raw_has_any_punct"] == 1.0            # True → 1.0
+        assert "is_timestamp" not in result.features
+        assert row["feature_is_timestamp"] == 0.0                 # missing → 0.0
+        assert row["feature_word_count"] == result.features["word_count"]
+
+    def test_loaded_model_runs_single_threaded(self, tmp_path):
+        classifier = TextBoxClassifier(mode="model", model_path=save_model(tmp_path, FixedProbModel(0.9)))
+        assert classifier.model.n_jobs == 1
+
+    def test_unknown_mode_uses_heuristic(self, tmp_path):
+        classifier = TextBoxClassifier(
+            mode="banana", model_path=save_model(tmp_path, FixedProbModel(0.9))
+        )
+        assert classifier.mode == "heuristic"
+        assert classifier.classify_regions([sound_effect()], 1400, 2000)[0].is_text_box is False
+
+    def test_filter_text_bubbles_batches_and_collects_both_scores(self, tmp_path):
+        """Pipeline path: one prediction per panel; collector keeps heuristic score plus model_prob."""
+        classifier = TextBoxClassifier(mode="model", model_path=save_model(tmp_path, FixedProbModel(0.9)))
+        classifier.ml_data_collector.samples.clear()
+
+        bubbles = [
+            SimpleNamespace(text=o.text, bounding_box=o.bounding_box, panel_id=3)
+            for o in (sound_effect(), dialogue())
+        ]
+        kept = classifier.filter_text_bubbles(bubbles, 1400, 2000)
+
+        assert len(kept) == 2                        # model keeps both at P=0.9
+        assert len(classifier.model.last_X) == 2     # both bubbles in a single call
+        samples = classifier.ml_data_collector.samples
+        assert [s["model_prob"] for s in samples] == [0.9, 0.9]
+        assert samples[0]["score"] < classifier.threshold   # heuristic score, not model prob
+        assert samples[0]["threshold_used"] == classifier.threshold

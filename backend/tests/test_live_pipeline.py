@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test script to test the full pipeline with webtoonScreenshot4.png
+Test script to test the full pipeline 
 """
 import requests
 import sys

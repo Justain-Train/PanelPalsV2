@@ -31,6 +31,9 @@ COPY --from=builder /root/.local /root/.local
 # Copy application code
 COPY backend/ ./backend/
 
+# Trained dialogue/background classifier (see CLASSIFIER_MODE)
+COPY models/ ./models/
+
 # Create non-root user for security
 RUN useradd -m -u 1000 panelpals && \
     chown -R panelpals:panelpals /app

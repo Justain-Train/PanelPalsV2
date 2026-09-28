@@ -8,10 +8,13 @@ Classifies OCR-detected text regions as either:
 Uses multiple heuristic features with weighted scoring.
 """
 
+import json
 import logging
+from pathlib import Path
 from typing import List, Tuple, Optional
 from dataclasses import dataclass
 
+from backend.config import settings
 from backend.services.vision import OCRResult
 from backend.services.text_preprocessing import TextPreprocessor
 from backend.services.language_features import (
@@ -36,8 +39,9 @@ class ClassificationResult:
     """Result of text box classification."""
     ocr_result: OCRResult
     is_text_box: bool
-    score: float
+    score: float  # Heuristic formula score
     features: dict  # Feature values for debugging/logging
+    model_prob: Optional[float] = None  # ML P(dialogue), when a model is loaded
 
 
 class TextBoxClassifier:
@@ -75,17 +79,24 @@ class TextBoxClassifier:
         weight_alphabet_ratio: float = 0.20,
         weight_word_frequency: float = 0.15,
         weight_trigram_score: float = 0.07,
-        weight_ocr_noise: float = 0.03
+        weight_ocr_noise: float = 0.03,
+        # ML classifier (defaults come from settings)
+        mode: Optional[str] = None,
+        model_path: Optional[str] = None,
+        model_threshold: Optional[float] = None
     ):
         """
         Initialize text box classifier with spatial and language features.
-        
+
         Args:
             classification_threshold: Minimum score to classify as TEXT BOX
             weight_*: Feature weights (must sum to 1.0)
                 Spatial features: bbox_area, word_count, text_density, aspect_ratio, punctuation
-                Language features: dictionary_ratio, alphabet_ratio, word_frequency, 
+                Language features: dictionary_ratio, alphabet_ratio, word_frequency,
                                    trigram_score, ocr_noise
+            mode: 'model' or 'heuristic' (default: settings.CLASSIFIER_MODE)
+            model_path: Trained model file (default: settings.ML_MODEL_PATH)
+            model_threshold: Min P(dialogue) in model mode (default: settings.ML_THRESHOLD)
         """
         self.threshold = classification_threshold
         self.weights = {
@@ -112,12 +123,113 @@ class TextBoxClassifier:
         self.preprocessor = TextPreprocessor()
         
         # ML data collection (always enabled for training)
+        self.collect_ml_data = True
         self.ml_data_collector = MLDataCollector()
-   
+
+        # ML classifier. In heuristic mode the model (if present) still runs so
+        # its probability is logged and collected for comparison.
+        self.mode = (mode or settings.CLASSIFIER_MODE).lower()
+        if self.mode not in ("model", "heuristic"):
+            logger.warning(f"Unknown CLASSIFIER_MODE '{self.mode}', using heuristic")
+            self.mode = "heuristic"
+        self.model_threshold = model_threshold if model_threshold is not None else settings.ML_THRESHOLD
+        self.model, self.model_feature_names = self._load_model(model_path or settings.ML_MODEL_PATH)
+        if self.mode == "model" and self.model is None:
+            logger.warning("CLASSIFIER_MODE=model but no usable model loaded - falling back to heuristic")
+
         logger.info(
             f"TextBoxClassifier initialized with language features: "
-            f"threshold={classification_threshold}, weights={self.weights}"
+            f"threshold={classification_threshold}, weights={self.weights}, "
+            f"mode={self.mode}, model={'loaded' if self.model is not None else 'none'}, "
+            f"model_threshold={self.model_threshold}"
         )
+
+    @staticmethod
+    def _load_model(model_path: str):
+        """
+        Load the trained classifier and its feature order.
+
+        Returns (model, feature_names), or (None, None) if the model is missing
+        or unusable - the caller then falls back to the heuristic.
+        """
+        path = Path(model_path)
+        if not path.exists():
+            logger.info(f"No ML model at {path}")
+            return None, None
+
+        try:
+            import joblib
+            model = joblib.load(path)
+            metadata = json.loads((path.parent / "model_metadata.json").read_text())
+            feature_names = metadata["feature_names"]
+
+            if not all(name.startswith("feature_") for name in feature_names):
+                raise ValueError("feature names must start with 'feature_'")
+            if getattr(model, "n_features_in_", len(feature_names)) != len(feature_names):
+                raise ValueError(
+                    f"model expects {model.n_features_in_} features, metadata lists {len(feature_names)}"
+                )
+            model_names = getattr(model, "feature_names_in_", None)
+            if model_names is not None and list(model_names) != feature_names:
+                raise ValueError("feature order in metadata doesn't match the model")
+
+            # Training used n_jobs=-1; per-panel batches are tiny, so threads only add overhead
+            if hasattr(model, "n_jobs"):
+                model.n_jobs = 1
+
+            logger.info(f"Loaded ML classifier {metadata.get('best_model', type(model).__name__)} from {path}")
+            return model, feature_names
+        except Exception as e:
+            logger.warning(f"Could not load ML model from {path}: {e}")
+            return None, None
+
+    def _model_probabilities(self, features_list: List[dict]) -> Optional[List[float]]:
+        """
+        P(dialogue) for each feature dict, or None if no model / prediction fails.
+
+        Converts features the same way the training pipeline did: booleans → 1/0,
+        missing values → 0.0.
+        """
+        if self.model is None or not features_list:
+            return None
+
+        import pandas as pd
+
+        def to_float(value) -> float:
+            if value is None:
+                return 0.0
+            return float(value)  # bool → 1.0/0.0
+
+        rows = [
+            [to_float(features.get(name[len("feature_"):])) for name in self.model_feature_names]
+            for features in features_list
+        ]
+        try:
+            X = pd.DataFrame(rows, columns=self.model_feature_names)
+            return [float(p) for p in self.model.predict_proba(X)[:, 1]]
+        except Exception as e:
+            logger.warning(f"ML prediction failed, using heuristic: {e}")
+            return None
+
+    def _decide(self, features_list: List[dict]) -> List[Tuple[float, Optional[float], bool]]:
+        """
+        Classify a batch of feature dicts.
+
+        Returns (heuristic_score, model_prob, is_text_box) per item. The model
+        decides when mode is 'model' and a probability is available; otherwise
+        the heuristic score is compared against the formula threshold.
+        """
+        probs = self._model_probabilities(features_list)
+        decisions = []
+        for i, features in enumerate(features_list):
+            score = self._compute_score(features)
+            prob = probs[i] if probs is not None else None
+            if self.mode == "model" and prob is not None:
+                is_text_box = prob >= self.model_threshold
+            else:
+                is_text_box = score >= self.threshold
+            decisions.append((score, prob, is_text_box))
+        return decisions
     
     def classify_regions(
         self,
@@ -154,21 +266,22 @@ class TextBoxClassifier:
             all_features.append(features)
 
         results = []
-        for ocr, features in zip(ocr_results, all_features):
-            score = self._compute_score(features)
-            is_text_box = score >= self.threshold
-
+        for ocr, features, (score, prob, is_text_box) in zip(
+            ocr_results, all_features, self._decide(all_features)
+        ):
             result = ClassificationResult(
                 ocr_result=ocr,
                 is_text_box=is_text_box,
                 score=score,
-                features=features
+                features=features,
+                model_prob=prob
             )
             results.append(result)
 
+            prob_str = f", model={prob:.2f}" if prob is not None else ""
             if is_text_box:
                 logger.info(
-                    f"✓ ACCEPTED as dialogue: '{ocr.text}' (score={score:.3f})\n"
+                    f"✓ ACCEPTED as dialogue: '{ocr.text}' (score={score:.3f}{prob_str})\n"
                     f"  Spatial: bbox_area={features.get('bbox_area', 0):.2f}, "
                     f"word_count={features.get('word_count', 0):.2f}, "
                     f"text_density={features.get('text_density', 0):.2f}, "
@@ -182,7 +295,7 @@ class TextBoxClassifier:
                 )
             else:
                 logger.info(
-                    f"✗ Filtered background: '{ocr.text[:30]}' (score={score:.2f})"
+                    f"✗ Filtered background: '{ocr.text[:30]}' (score={score:.2f}{prob_str})"
                 )
         
         # Summary
@@ -559,19 +672,23 @@ class TextBoxClassifier:
             })()
             pseudo_ocr_results.append(pseudo_ocr)
         
-        # Compute features and scores for each bubble
-        filtered_bubbles = []
+        # Compute features for every bubble, then classify the panel in one batch
+        all_features = []
         for bubble, pseudo_ocr in zip(bubbles, pseudo_ocr_results):
             features = self._compute_features(pseudo_ocr, image_area, pseudo_ocr_results)
-            
+
             # Apply edge case handling for short dialogue
             if len(bubble.text.split()) <= 2:
                 features = handle_short_dialogue(bubble.text, features)
-            
-            score = self._compute_score(features)
-            is_text_box = score >= self.threshold
-            
-            # Collect ML training data (always enabled)
+
+            all_features.append(features)
+
+        filtered_bubbles = []
+        for bubble, features, (score, prob, is_text_box) in zip(
+            bubbles, all_features, self._decide(all_features)
+        ):
+            # Collect ML training data (always enabled). `score` stays the
+            # heuristic score so collected data keeps a formula baseline.
             if self.collect_ml_data and self.ml_data_collector:
                 self.ml_data_collector.collect_sample(
                     text=bubble.text,
@@ -583,15 +700,17 @@ class TextBoxClassifier:
                         'image_width': image_width,
                         'image_height': image_height,
                         'is_text_box': is_text_box,
-                        'threshold': self.threshold
+                        'threshold': self.threshold,
+                        'model_prob': prob
                     })
                 logger.debug(f"📊 Collected ML sample: '{bubble.text[:30]}' (score={score:.2f})")
-            
+
+            prob_str = f", model={prob:.2f}" if prob is not None else ""
             if is_text_box:
                 filtered_bubbles.append(bubble)
             else:
                 logger.info(
-                    f"Filtered background bubble: '{bubble.text[:30]}...' (score={score:.2f}) {features}"
+                    f"Filtered background bubble: '{bubble.text[:30]}...' (score={score:.2f}{prob_str}) {features}"
                 )
         
         logger.info(

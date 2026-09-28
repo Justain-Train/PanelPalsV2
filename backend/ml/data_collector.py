@@ -125,6 +125,10 @@ class MLDataCollector:
             "image_width": metadata.get("image_width") if metadata else None,
             "image_height": metadata.get("image_height") if metadata else None,
             "threshold_used": metadata.get("threshold") if metadata else None,
+            "model_prob": (
+                round(metadata["model_prob"], 4)
+                if metadata and metadata.get("model_prob") is not None else None
+            ),
         }
         
         self.samples.append(sample)

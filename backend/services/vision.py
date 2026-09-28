@@ -6,7 +6,9 @@ Performs text detection on images using Google Cloud Vision API.
 """
 
 import logging
+import re
 import time
+import unicodedata
 from typing import List, Dict, Any, Optional
 from google.cloud import vision
 from google.api_core import retry, exceptions
@@ -14,6 +16,41 @@ from google.api_core import retry, exceptions
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Punctuation that appears in English webtoon lettering
+ALLOWED_PUNCTUATION = set("'’\".,!?;:()-–—…*~&%$#@+/“”")
+
+# Numbers starting with 3+ zeros (000, 00000, 00005). Real numbers never start
+# this way, but OCR produces them from round shapes and textures in the art.
+# 1000 / 5000 / 999 / 111 don't match and are kept.
+LEADING_ZEROS = re.compile(r"^0{3,}\d*$")
+
+
+def _is_allowed_char(char: str) -> bool:
+    """Latin letters (incl. accented), ASCII digits, and webtoon punctuation."""
+    if char in ALLOWED_PUNCTUATION or ("0" <= char <= "9"):
+        return True
+    # Unicode name check rejects Cyrillic/Greek look-alikes such as 'о' or 'р'
+    return char.isalpha() and unicodedata.name(char, "").startswith("LATIN")
+
+
+def is_noise_token(text: str) -> bool:
+    """
+    Check whether a single OCR word is noise that shouldn't reach grouping.
+
+    A word is noise if:
+    - it contains any character outside Latin letters, digits, and webtoon
+      punctuation - e.g. Korean/CJK/Cyrillic text in the artwork, or symbols
+      like ☐ ©
+    - it's a number starting with 3+ zeros (000, 00005)
+    """
+    text = text.strip()
+    if not text:
+        return True
+    if not all(_is_allowed_char(c) for c in text):
+        return True
+    return bool(LEADING_ZEROS.match(text))
 
 
 class BoundingBox:
@@ -180,7 +217,12 @@ class GoogleVisionOCRService:
         
         # Parse results (skip first annotation which is full text)
         results = []
+        noise = []
         for annotation in response.text_annotations[1:]:
+            if is_noise_token(annotation.description):
+                noise.append(annotation.description)
+                continue
+
             vertices = self._normalize_vertices(annotation.bounding_poly.vertices)
             bbox = BoundingBox(vertices)
             
@@ -190,7 +232,9 @@ class GoogleVisionOCRService:
                 confidence=1.0  # Vision API doesn't provide word-level confidence
             )
             results.append(result)
-        
+
+        if noise:
+            logger.info(f"Filtered {len(noise)} OCR noise tokens: {noise}")
         logger.info(f"Detected {len(results)} text elements")
         return results
     

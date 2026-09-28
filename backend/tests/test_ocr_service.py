@@ -12,7 +12,8 @@ from google.api_core import exceptions
 from backend.services.vision import (
     GoogleVisionOCRService,
     BoundingBox,
-    OCRResult
+    OCRResult,
+    is_noise_token
 )
 
 
@@ -199,6 +200,69 @@ def test_detect_text_success(sample_vision_response):
     assert results[0].bounding_box.left == 10
     assert results[0].bounding_box.right == 50
     assert results[1].bounding_box.left == 60
+
+
+# Noise Filter Tests
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token", [
+    "HUH", "?", "!", "...", "…", "—", "YOU'VE", "--", "*****", "D",
+    "I", "A", "café",                        # letters incl. accented Latin
+    "20", "999", "111", "222", "007",        # real numbers the lettering may show
+    "1000", "5000", "10000", "5,000", "$100",
+])
+def test_is_noise_token_keeps_real_text(token):
+    """Words, punctuation, and real numbers pass through."""
+    assert not is_noise_token(token)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("token", [
+    "한다", "加", "リッツザ", "ין", "།",       # Korean, CJK, Japanese, Hebrew, Tibetan in the art
+    "УЕАН", "о", "рор", "водоот",            # Cyrillic, incl. look-alikes of Latin letters
+    "BEGлi",                                 # mixed Latin + Cyrillic
+    "☐", "©", "|", "\\",                     # stray symbols
+    "000", "0000", "00000", "00005",         # leading-zero runs from round shapes/textures
+    "", "   ",
+])
+def test_is_noise_token_drops_noise(token):
+    """Non-Latin script, stray symbols, and leading-zero runs are noise."""
+    assert is_noise_token(token)
+
+
+def _annotation(text, x):
+    """Build a mock Vision word annotation at horizontal offset x."""
+    annotation = Mock()
+    annotation.description = text
+    annotation.bounding_poly.vertices = [
+        Mock(x=x, y=20), Mock(x=x + 30, y=20), Mock(x=x + 30, y=40), Mock(x=x, y=40)
+    ]
+    return annotation
+
+
+@pytest.mark.unit
+@pytest.mark.google_vision
+def test_detect_text_filters_noise_tokens():
+    """Noise words are dropped before results reach bubble grouping."""
+    response = Mock()
+    response.error.message = ""
+    response.text_annotations = [
+        _annotation("00000 HUH ? УЕАН 999", 0),  # full-text annotation, skipped
+        _annotation("00000", 0),
+        _annotation("HUH", 40),
+        _annotation("?", 80),
+        _annotation("УЕАН", 120),
+        _annotation("999", 160),
+    ]
+
+    service = GoogleVisionOCRService()
+    service.client = MagicMock()
+    service.client.text_detection.return_value = response
+
+    results = service.detect_text(b"fake_image_data")
+
+    assert [r.text for r in results] == ["HUH", "?", "999"]
+    assert results[0].bounding_box.left == 40
 
 
 @pytest.mark.unit
