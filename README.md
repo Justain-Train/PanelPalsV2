@@ -1,6 +1,14 @@
+
 # PanelPals V2 - Backend
 
 FastAPI backend for the PanelPals V2 Webtoon OCR → TTS pipeline.
+
+## Video Demo
+
+
+https://github.com/user-attachments/assets/8d07c8c5-5465-4dc8-a677-6c273b8a01dc
+
+
 
 ## Architecture
 
