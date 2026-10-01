@@ -60,6 +60,7 @@ htmlcov/
 *.json
 !package.json
 !package-lock.json
+!models/model_metadata.json
 
 # Audio files (generated)
 *.wav
@@ -71,4 +72,11 @@ htmlcov/
 # Node (frontend - separate repo, but ignore if present)
 node_modules/
 
+screenshots/
+
+# ML training data (contains copyrighted webtoon text)
+ml_data/
+backend/ml/ml_data/
+
+# Downloaded panels
 screenshots/

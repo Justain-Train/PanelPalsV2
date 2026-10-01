@@ -50,8 +50,9 @@ def test_security_headers(test_client):
     assert "x-frame-options" in response.headers
     assert response.headers["x-frame-options"] == "DENY"
     
-    assert "x-xss-protection" in response.headers
-    assert response.headers["x-xss-protection"] == "1; mode=block"
+    # X-XSS-Protection is deprecated and no longer sent
+    assert "x-xss-protection" not in response.headers
+    assert response.headers["referrer-policy"] == "no-referrer"
 
 
 @pytest.mark.unit

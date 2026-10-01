@@ -8,13 +8,21 @@ Classifies OCR-detected text regions as either:
 Uses multiple heuristic features with weighted scoring.
 """
 
+import json
 import logging
-from typing import List, Tuple, TYPE_CHECKING
+from pathlib import Path
+from typing import List, Tuple, Optional
 from dataclasses import dataclass
 
+from backend.config import settings
 from backend.services.vision import OCRResult
 from backend.services.text_preprocessing import TextPreprocessor
 from backend.services.language_features import (
+    text_shape_features,
+    layout_features,
+    image_background_features,
+    context_features,
+    to_grayscale_array,
     compute_dictionary_ratio,
     compute_alphabet_ratio,
     compute_word_frequency_score,
@@ -23,8 +31,10 @@ from backend.services.language_features import (
     handle_short_dialogue
 )
 
-if TYPE_CHECKING:
-    from backend.services.text_grouping import TextBubble
+
+from backend.services.text_grouping import TextBubble
+from backend.ml.data_collector import MLDataCollector
+
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +44,9 @@ class ClassificationResult:
     """Result of text box classification."""
     ocr_result: OCRResult
     is_text_box: bool
-    score: float
+    score: float  # Heuristic formula score
     features: dict  # Feature values for debugging/logging
+    model_prob: Optional[float] = None  # ML P(dialogue), when a model is loaded
 
 
 class TextBoxClassifier:
@@ -73,17 +84,24 @@ class TextBoxClassifier:
         weight_alphabet_ratio: float = 0.20,
         weight_word_frequency: float = 0.15,
         weight_trigram_score: float = 0.07,
-        weight_ocr_noise: float = 0.03
+        weight_ocr_noise: float = 0.03,
+        # ML classifier (defaults come from settings)
+        mode: Optional[str] = None,
+        model_path: Optional[str] = None,
+        model_threshold: Optional[float] = None
     ):
         """
         Initialize text box classifier with spatial and language features.
-        
+
         Args:
             classification_threshold: Minimum score to classify as TEXT BOX
             weight_*: Feature weights (must sum to 1.0)
                 Spatial features: bbox_area, word_count, text_density, aspect_ratio, punctuation
-                Language features: dictionary_ratio, alphabet_ratio, word_frequency, 
+                Language features: dictionary_ratio, alphabet_ratio, word_frequency,
                                    trigram_score, ocr_noise
+            mode: 'model' or 'heuristic' (default: settings.CLASSIFIER_MODE)
+            model_path: Trained model file (default: settings.ML_MODEL_PATH)
+            model_threshold: Min P(dialogue) in model mode (default: settings.ML_THRESHOLD)
         """
         self.threshold = classification_threshold
         self.weights = {
@@ -109,25 +127,158 @@ class TextBoxClassifier:
         # Initialize text preprocessor
         self.preprocessor = TextPreprocessor()
         
+        # ML data collection (off unless ML_COLLECT_DATA is set; collect_ml_data.py turns it on)
+        self.collect_ml_data = settings.ML_COLLECT_DATA
+        self.ml_data_collector = MLDataCollector()
+
+        # ML classifier. In heuristic mode the model (if present) still runs so
+        # its probability is logged and collected for comparison.
+        self.mode = (mode or settings.CLASSIFIER_MODE).lower()
+        if self.mode not in ("model", "heuristic"):
+            logger.warning(f"Unknown CLASSIFIER_MODE '{self.mode}', using heuristic")
+            self.mode = "heuristic"
+        self.model_threshold = model_threshold if model_threshold is not None else settings.ML_THRESHOLD
+        self.model, self.model_feature_names = self._load_model(model_path or settings.ML_MODEL_PATH)
+        if self.mode == "model" and self.model is None:
+            logger.warning("CLASSIFIER_MODE=model but no usable model loaded - falling back to heuristic")
+
         logger.info(
             f"TextBoxClassifier initialized with language features: "
-            f"threshold={classification_threshold}, weights={self.weights}"
+            f"threshold={classification_threshold}, weights={self.weights}, "
+            f"mode={self.mode}, model={'loaded' if self.model is not None else 'none'}, "
+            f"model_threshold={self.model_threshold}"
         )
+
+    @staticmethod
+    def _load_model(model_path: str):
+        """
+        Load the trained classifier and its feature order.
+
+        Returns (model, feature_names), or (None, None) if the model is missing
+        or unusable - the caller then falls back to the heuristic.
+        """
+        path = Path(model_path)
+        if not path.exists():
+            logger.info(f"No ML model at {path}")
+            return None, None
+
+        try:
+            import joblib
+            model = joblib.load(path)
+            metadata = json.loads((path.parent / "model_metadata.json").read_text())
+            feature_names = metadata["feature_names"]
+
+            if not all(name.startswith("feature_") for name in feature_names):
+                raise ValueError("feature names must start with 'feature_'")
+            if getattr(model, "n_features_in_", len(feature_names)) != len(feature_names):
+                raise ValueError(
+                    f"model expects {model.n_features_in_} features, metadata lists {len(feature_names)}"
+                )
+            model_names = getattr(model, "feature_names_in_", None)
+            if model_names is not None and list(model_names) != feature_names:
+                raise ValueError("feature order in metadata doesn't match the model")
+
+            # Training used n_jobs=-1; per-panel batches are tiny, so threads only add overhead
+            if hasattr(model, "n_jobs"):
+                model.n_jobs = 1
+
+            logger.info(f"Loaded ML classifier {metadata.get('best_model', type(model).__name__)} from {path}")
+            return model, feature_names
+        except Exception as e:
+            logger.warning(f"Could not load ML model from {path}: {e}")
+            return None, None
+
+    def _model_probabilities(self, features_list: List[dict]) -> Optional[List[float]]:
+        """
+        P(dialogue) for each feature dict, or None if no model / prediction fails.
+
+        Converts features the same way the training pipeline did: booleans → 1/0,
+        missing values → 0.0.
+        """
+        if self.model is None or not features_list:
+            return None
+
+        import pandas as pd
+
+        def to_float(value) -> float:
+            if value is None:
+                return 0.0
+            return float(value)  # bool → 1.0/0.0
+
+        rows = [
+            [to_float(features.get(name[len("feature_"):])) for name in self.model_feature_names]
+            for features in features_list
+        ]
+        try:
+            X = pd.DataFrame(rows, columns=self.model_feature_names)
+            return [float(p) for p in self.model.predict_proba(X)[:, 1]]
+        except Exception as e:
+            logger.warning(f"ML prediction failed, using heuristic: {e}")
+            return None
+
+    def _decide(self, features_list: List[dict]) -> List[Tuple[float, Optional[float], bool]]:
+        """
+        Classify a batch of feature dicts.
+
+        Returns (heuristic_score, model_prob, is_text_box) per item. The model
+        decides when mode is 'model' and a probability is available; otherwise
+        the heuristic score is compared against the formula threshold.
+        """
+        probs = self._model_probabilities(features_list)
+        decisions = []
+        for i, features in enumerate(features_list):
+            score = self._compute_score(features)
+            prob = probs[i] if probs is not None else None
+            if self.mode == "model" and prob is not None:
+                is_text_box = prob >= self.model_threshold
+            else:
+                is_text_box = score >= self.threshold
+            decisions.append((score, prob, is_text_box))
+        return decisions
     
+    def _add_extra_features(
+        self,
+        texts: List[str],
+        bboxes: List,
+        word_boxes: List[Optional[List]],
+        features_list: List[dict],
+        image_width: int,
+        image_height: int,
+        image=None
+    ) -> None:
+        """
+        Add the punctuation-independent features (text shape, layout, image
+        background, neighbours) to each feature dict in place.
+
+        Neighbour features use the heuristic score of adjacent bubbles, so
+        they're computed identically during data collection and live.
+        """
+        gray = to_grayscale_array(image)
+        for text, bbox, words, features in zip(texts, bboxes, word_boxes, features_list):
+            features.update(text_shape_features(text))
+            features.update(layout_features(bbox, image_width, image_height, words))
+            features.update(image_background_features(gray, bbox))
+        scores = [self._compute_score(f) for f in features_list]
+        for features, extra in zip(features_list,
+                                   context_features(texts, bboxes, scores, image_width, image_height)):
+            features.update(extra)
+
     def classify_regions(
         self,
         ocr_results: List[OCRResult],
         image_width: int,
-        image_height: int
+        image_height: int,
+        image=None
     ) -> List[ClassificationResult]:
         """
         Classify all OCR regions in an image.
-        
+
         Args:
             ocr_results: List of OCR results to classify
             image_width: Width of source image (pixels)
             image_height: Height of source image (pixels)
-            
+            image: Optional PIL image of the panel, for background features
+
         Returns:
             List of classification results
         """
@@ -141,33 +292,37 @@ class TextBoxClassifier:
         all_features = []
         for ocr in ocr_results:
             features = self._compute_features(ocr, image_area, ocr_results)
-            
+
             # Apply edge case handling for short dialogue
-            # This boosts scores for valid short exclamations like "NO", "WAIT!", etc.
             if len(ocr.text.split()) <= 2:
                 features = handle_short_dialogue(ocr.text, features)
-            
+
             all_features.append(features)
-        
-        # Classify each region
+
+        self._add_extra_features(
+            [o.text for o in ocr_results],
+            [o.bounding_box for o in ocr_results],
+            [[o.bounding_box] for o in ocr_results],
+            all_features, image_width, image_height, image
+        )
+
         results = []
-        for ocr, features in zip(ocr_results, all_features):
-            score = self._compute_score(features)
-            is_text_box = score >= self.threshold
-            
+        for ocr, features, (score, prob, is_text_box) in zip(
+            ocr_results, all_features, self._decide(all_features)
+        ):
             result = ClassificationResult(
                 ocr_result=ocr,
                 is_text_box=is_text_box,
                 score=score,
-                features=features
+                features=features,
+                model_prob=prob
             )
             results.append(result)
-            
-            # Enhanced logging with feature breakdown
+
+            prob_str = f", model={prob:.2f}" if prob is not None else ""
             if is_text_box:
-                # Log detailed features for accepted text (especially non-English)
                 logger.info(
-                    f"✓ ACCEPTED as dialogue: '{ocr.text}' (score={score:.3f})\n"
+                    f"✓ ACCEPTED as dialogue: '{ocr.text}' (score={score:.3f}{prob_str})\n"
                     f"  Spatial: bbox_area={features.get('bbox_area', 0):.2f}, "
                     f"word_count={features.get('word_count', 0):.2f}, "
                     f"text_density={features.get('text_density', 0):.2f}, "
@@ -181,7 +336,7 @@ class TextBoxClassifier:
                 )
             else:
                 logger.info(
-                    f"✗ Filtered background: '{ocr.text[:30]}' (score={score:.2f})"
+                    f"✗ Filtered background: '{ocr.text[:30]}' (score={score:.2f}{prob_str})"
                 )
         
         # Summary
@@ -349,23 +504,18 @@ class TextBoxClassifier:
         has_any_punct = any(p in text for p in '.!?,;:—-~')
         
         if has_ending_punct:
-            punctuation_score = 1.0  # Clear sentence ending
+            punctuation_score = 1.0
         elif has_any_punct:
-            punctuation_score = 0.6  # Has punctuation but not at end
+            punctuation_score = 0.6
         else:
-            punctuation_score = 0.2  # No punctuation - likely UI text or incomplete
-        
-        # ========================================================================
-        # TEXT PREPROCESSING FOR LANGUAGE FEATURES
-        # ========================================================================
-        # Clean OCR artifacts and normalize text before computing language features
-        # This improves accuracy by removing noise, fixing common OCR errors
+            punctuation_score = 0.2
+
+        # Preprocess text before computing language features
         preprocessed_text = self.preprocessor.preprocess_for_classification(text)
-        
-        # Debug: Log preprocessing changes
+
         if preprocessed_text != text:
             logger.debug(f"Preprocessed: '{text}' → '{preprocessed_text}'")
-        
+
         # Check if text is non-English (Korean, Japanese, Chinese, etc.)
         # Count non-ASCII characters
         non_ascii_count = sum(1 for c in preprocessed_text if ord(c) > 127)
@@ -378,12 +528,9 @@ class TextBoxClassifier:
                 f"({non_ascii_ratio*100:.0f}% non-ASCII chars) - "
                 f"Language features will score LOW"
             )
-        
-        # ========================================================================
-        # LANGUAGE-BASED FEATURES (NEW)
-        # ========================================================================
-        
-        # 6. Dictionary word ratio - filters gibberish and OCR errors
+
+        # Language features
+        # 6. Dictionary word ratio
         dict_ratio = compute_dictionary_ratio(preprocessed_text)
         
         # Normalize to [0, 1] with boosting for high values
@@ -431,13 +578,7 @@ class TextBoxClassifier:
         noise = compute_ocr_noise_score(preprocessed_text)
         ocr_noise_score = 1.0 - noise  # Invert: high score = clean text
         
-        # ========================================================================
-        # NON-ENGLISH DETECTION AND PENALTY
-        # ========================================================================
-        # If text is primarily non-English (Korean, Japanese, Chinese, etc.),
-        # apply a penalty since our language features are English-only
-        
-        # Count non-ASCII characters (Korean, Japanese, Chinese, etc.)
+        # Non-English penalty: force language scores to 0 if >50% non-ASCII
         non_ascii_count = sum(1 for c in text if ord(c) > 127)
         total_chars = len(text.replace(' ', ''))
         non_ascii_ratio = non_ascii_count / total_chars if total_chars > 0 else 0
@@ -449,17 +590,13 @@ class TextBoxClassifier:
                 f"Non-English text detected (should be filtered): '{text}' "
                 f"({non_ascii_ratio*100:.0f}% non-ASCII) - applying penalty"
             )
-            # Force language feature scores to 0 for non-English text
             dictionary_ratio_score = 0.0
             alphabet_ratio_score = 0.0
             word_frequency_score = 0.0
             trigram_score = 0.0
-            # Also penalize punctuation (Korean sound effects rarely have English punctuation)
             if not has_ending_punct:
                 punctuation_score = 0.0
-        
-        # ========================================================================
-        
+
         return {
             # Spatial features
             'bbox_area': bbox_area_score,
@@ -473,7 +610,7 @@ class TextBoxClassifier:
             'word_frequency': word_frequency_score,
             'trigram_score': trigram_score,
             'ocr_noise': ocr_noise_score,
-            # Raw values for debugging
+            # Raw values
             'raw_bbox_area': bbox_area,
             'raw_word_count': word_count,
             'raw_density': density,
@@ -545,24 +682,44 @@ class TextBoxClassifier:
         self,
         bubbles: List["TextBubble"],
         image_width: int,
-        image_height: int
+        image_height: int,
+        image=None
     ) -> List["TextBubble"]:
         """
         Filter text bubbles to only include dialogue/narration.
-        
+
         Removes background text like sound effects and signs.
         Uses the grouped bubble's combined text and bounding box for classification.
-        
+
         Args:
             bubbles: List of TextBubble objects
             image_width: Width of source image
             image_height: Height of source image
-            
+
         Returns:
             Filtered list containing only dialogue/narration bubbles
         """
+        kept, _ = self.split_text_bubbles(bubbles, image_width, image_height, image)
+        return kept
+
+    def split_text_bubbles(
+        self,
+        bubbles: List["TextBubble"],
+        image_width: int,
+        image_height: int,
+        image=None
+    ) -> Tuple[List["TextBubble"], List["TextBubble"]]:
+        """
+        Classify text bubbles into dialogue/narration and background.
+
+        Like filter_text_bubbles, but also returns the background bubbles so
+        callers can use them (e.g. sound words like SOB become audio tags).
+
+        Returns:
+            (dialogue bubbles, background bubbles), each in original order
+        """
         if not bubbles:
-            return []
+            return [], []
         
         image_area = image_width * image_height
         
@@ -576,30 +733,61 @@ class TextBoxClassifier:
             })()
             pseudo_ocr_results.append(pseudo_ocr)
         
-        # Compute features and scores for each bubble
-        filtered_bubbles = []
+        # Compute features for every bubble, then classify the panel in one batch
+        all_features = []
         for bubble, pseudo_ocr in zip(bubbles, pseudo_ocr_results):
             features = self._compute_features(pseudo_ocr, image_area, pseudo_ocr_results)
-            
+
             # Apply edge case handling for short dialogue
             if len(bubble.text.split()) <= 2:
                 features = handle_short_dialogue(bubble.text, features)
-            
-            score = self._compute_score(features)
-            is_text_box = score >= self.threshold
-            
+
+            all_features.append(features)
+
+        self._add_extra_features(
+            [b.text for b in bubbles],
+            [b.bounding_box for b in bubbles],
+            [[r.bounding_box for r in getattr(b, "ocr_results", None) or []] for b in bubbles],
+            all_features, image_width, image_height, image
+        )
+
+        filtered_bubbles = []
+        background_bubbles = []
+        for bubble, features, (score, prob, is_text_box) in zip(
+            bubbles, all_features, self._decide(all_features)
+        ):
+            # Collect ML training data (always enabled). `score` stays the
+            # heuristic score so collected data keeps a formula baseline.
+            if self.collect_ml_data and self.ml_data_collector:
+                self.ml_data_collector.collect_sample(
+                    text=bubble.text,
+                    features=features,
+                    score=score,
+                    bbox=bubble.bounding_box,
+                    panel_id=getattr(bubble, 'panel_id', None),
+                    metadata={
+                        'image_width': image_width,
+                        'image_height': image_height,
+                        'is_text_box': is_text_box,
+                        'threshold': self.threshold,
+                        'model_prob': prob
+                    })
+                logger.debug(f"📊 Collected ML sample: '{bubble.text[:30]}' (score={score:.2f})")
+
+            prob_str = f", model={prob:.2f}" if prob is not None else ""
             if is_text_box:
                 filtered_bubbles.append(bubble)
             else:
+                background_bubbles.append(bubble)
                 logger.info(
-                    f"Filtered background bubble: '{bubble.text[:30]}...' (score={score:.2f}) {features}"
+                    f"Filtered background bubble: '{bubble.text[:30]}...' (score={score:.2f}{prob_str}) {features}"
                 )
-        
+
         logger.info(
             f"Filtered {len(bubbles)} bubbles → {len(filtered_bubbles)} dialogue bubbles "
-            f"({len(bubbles) - len(filtered_bubbles)} background bubbles filtered)"
-        
+            f"({len(background_bubbles)} background bubbles filtered)"
+
         )
-        
-        return filtered_bubbles
+
+        return filtered_bubbles, background_bubbles
 

@@ -1,7 +1,6 @@
 """
 Text Bubble Grouping Service
 
-Section 6.1: Bubble-Level Text Grouping
 Groups OCR word-level detections into text bubbles using spatial proximity heuristics.
 """
 
@@ -20,17 +19,14 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class TextBubble:
-    """
-    Represents a grouped text bubble with reading order.
-    
-    Section 6.1: Each text bubble should be treated as a single dialogue unit.
-    """
+    """Represents a grouped text bubble with reading order."""
     text: str
     bounding_box: BoundingBox
     ocr_results: List[OCRResult] = field(default_factory=list)
     reading_order: int = 0
-    panel_id: int = -1  # NEW: Track which panel this bubble belongs to
-    
+    panel_id: int = -1  # Track which panel this bubble belongs to
+    audio_tags: List[str] = field(default_factory=list)  # e.g. ["[laughs]"], applied at TTS time
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
         return {
@@ -38,20 +34,16 @@ class TextBubble:
             "bounding_box": self.bounding_box.to_dict(),
             "reading_order": self.reading_order,
             "word_count": len(self.ocr_results),
-            "panel_id": self.panel_id
+            "panel_id": self.panel_id,
+            "audio_tags": list(self.audio_tags)
         }
 
 
 class TextBubbleGrouper:
     """
     Groups OCR results into text bubbles using spatial proximity.
-    
-    Section 6.1: Bubble-Level Text Grouping
-    - Bounding box proximity
-    - Line alignment
-    - Overlap heuristics
     """
-    
+
     def __init__(
         self,
         max_vertical_gap: int = None,
@@ -111,14 +103,11 @@ class TextBubbleGrouper:
         else:
             vertical_gap = bbox2.top - bbox1.bottom
         
-        # CRITICAL: Detect large horizontal separation (side-by-side bubbles)
-        # If words are far apart horizontally, they're likely different bubbles
-        # even if vertically aligned
+        # Large horizontal gap indicates separate bubbles
         avg_width = (bbox1.width + bbox2.width) / 2
-        large_horizontal_gap_threshold = max(100, avg_width * 2.5)  # 100px minimum or 2.5× word width
+        large_horizontal_gap_threshold = max(100, avg_width * 2.5)
         
         if horizontal_gap > large_horizontal_gap_threshold:
-            # Too far apart horizontally - definitely different bubbles
             logger.debug(
                 f"Prevented side-by-side merge: '{word1.text}' vs '{word2.text}' "
                 f"(horizontal_gap={horizontal_gap:.0f}px > {large_horizontal_gap_threshold:.0f}px)"
@@ -127,10 +116,8 @@ class TextBubbleGrouper:
         
         # Same line words (>50% vertical overlap)
         if vertical_overlap_ratio > 0.5:
-            # For same-line words, use STRICT horizontal proximity
-            # This prevents merging side-by-side bubbles on the same horizontal level
-            # Use word width as reference - words in same bubble are typically close
-            max_horizontal_gap = min(25, avg_width * 0.8)  # Cap at 25px or 80% of avg word width
+            # Same-line words: use strict horizontal proximity
+            max_horizontal_gap = min(25, avg_width * 0.8)
             
             is_close = horizontal_gap < max_horizontal_gap
             
@@ -347,9 +334,7 @@ class TextBubbleGrouper:
     def _sort_by_reading_order(self, ocr_results: List[OCRResult]) -> List[OCRResult]:
         """
         Sort OCR results by reading order (top-to-bottom, left-to-right).
-        
-        Section 7: Preserve reading order based on vertical position and panel order
-        
+
         Strategy:
         1. Group words into lines based on vertical overlap
         2. Sort lines by vertical position (top)
@@ -410,9 +395,7 @@ class TextBubbleGrouper:
     def group_into_bubbles(self, ocr_results: List[OCRResult], panel_id: int = -1) -> List[TextBubble]:
         """
         Group OCR results into text bubbles using spatial clustering.
-        
-        Section 6.1: Group OCR words into text bubbles using proximity heuristics
-        
+
         Algorithm:
         1. Cluster words into bubbles based on spatial proximity (graph-based)
         2. Sort bubbles by reading order (top-to-bottom, left-to-right)
@@ -481,7 +464,7 @@ class TextBubbleGrouper:
             text=text,
             bounding_box=merged_bbox,
             ocr_results=sorted_results,  # Store sorted results
-            panel_id=panel_id  # NEW: Track panel ID
+            panel_id=panel_id
         )
     
     def group_into_bubbles_with_metadata(

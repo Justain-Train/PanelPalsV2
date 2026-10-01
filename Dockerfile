@@ -19,6 +19,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy backend code
 COPY backend/ ./backend/
 
+# Trained dialogue/background classifier (see CLASSIFIER_MODE)
+COPY models/ ./models/
+
 # Expose port 8000 for FastAPI
 EXPOSE 8000
 

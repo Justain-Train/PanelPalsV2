@@ -5,15 +5,55 @@ Section 6: OCR Pipeline (Backend Only – Google Vision API)
 Performs text detection on images using Google Cloud Vision API.
 """
 
+import io
 import logging
+import re
 import time
+import unicodedata
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict, Any, Optional
+from PIL import Image
 from google.cloud import vision
 from google.api_core import retry, exceptions
 
 from backend.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+# Punctuation that appears in English webtoon lettering
+ALLOWED_PUNCTUATION = set("'’\".,!?;:()-–—…*~&%$#@+/“”")
+
+# Numbers starting with 3+ zeros (000, 00000, 00005). Real numbers never start
+# this way, but OCR produces them from round shapes and textures in the art.
+# 1000 / 5000 / 999 / 111 don't match and are kept.
+LEADING_ZEROS = re.compile(r"^0{3,}\d*$")
+
+
+def _is_allowed_char(char: str) -> bool:
+    """Latin letters (incl. accented), ASCII digits, and webtoon punctuation."""
+    if char in ALLOWED_PUNCTUATION or ("0" <= char <= "9"):
+        return True
+    # Unicode name check rejects Cyrillic/Greek look-alikes such as 'о' or 'р'
+    return char.isalpha() and unicodedata.name(char, "").startswith("LATIN")
+
+
+def is_noise_token(text: str) -> bool:
+    """
+    Check whether a single OCR word is noise that shouldn't reach grouping.
+
+    A word is noise if:
+    - it contains any character outside Latin letters, digits, and webtoon
+      punctuation - e.g. Korean/CJK/Cyrillic text in the artwork, or symbols
+      like ☐ ©
+    - it's a number starting with 3+ zeros (000, 00005)
+    """
+    text = text.strip()
+    if not text:
+        return True
+    if not all(_is_allowed_char(c) for c in text):
+        return True
+    return bool(LEADING_ZEROS.match(text))
 
 
 class BoundingBox:
@@ -132,20 +172,7 @@ class GoogleVisionOCRService:
         deadline=60.0
     )
     def _detect_text_with_retry(self, image: vision.Image) -> Any:
-        """
-        Call Vision API with retry logic.
-        
-        Section 6.1: Enable retries and fallbacks
-        
-        Args:
-            image: Vision API Image object
-            
-        Returns:
-            Vision API response
-            
-        Raises:
-            Exception: If API call fails after retries
-        """
+        """Call Vision API with exponential-backoff retry."""
         if self.client is None:
             raise ValueError("Google Vision API client not initialized")
         
@@ -193,7 +220,12 @@ class GoogleVisionOCRService:
         
         # Parse results (skip first annotation which is full text)
         results = []
+        noise = []
         for annotation in response.text_annotations[1:]:
+            if is_noise_token(annotation.description):
+                noise.append(annotation.description)
+                continue
+
             vertices = self._normalize_vertices(annotation.bounding_poly.vertices)
             bbox = BoundingBox(vertices)
             
@@ -203,65 +235,175 @@ class GoogleVisionOCRService:
                 confidence=1.0  # Vision API doesn't provide word-level confidence
             )
             results.append(result)
-        
+
+        if noise:
+            logger.info(f"Filtered {len(noise)} OCR noise tokens: {noise}")
         logger.info(f"Detected {len(results)} text elements")
         return results
     
     def detect_text_batch(
-        self, 
+        self,
         images: List[bytes],
     ) -> List[List[OCRResult]]:
         """
         Detect text in multiple images.
-        
-        Section 6.1: Process images in backend-controlled batches
-        
+
+        With OCR_STITCH_MAX_HEIGHT > 0, consecutive panels are stacked into
+        tall strips so one Vision call (one billable unit) covers several
+        panels; results are split back per panel with panel-relative
+        coordinates, so callers see the same shape as unstitched OCR.
+        Calls run up to OCR_MAX_PARALLEL_REQUESTS at a time.
+
         Args:
             images: List of image bytes
-            batch_size: Override default batch size (from config)
-            
+
         Returns:
-            List of OCR results per image
-            
+            List of OCR results per image, in the same order as `images`.
+            An image whose call fails gets [] and is logged; the rest continue.
+
         Raises:
-            ValueError: If Vision API not configured or invalid batch size
+            ValueError: If Vision API not configured or invalid parallelism
         """
         if self.client is None:
             raise ValueError("Google Vision API not configured")
-        
+
         if not images:
             return []
-        
-        # Use configured batch size
-        batch_size = settings.GOOGLE_VISION_MAX_BATCH_SIZE
 
-        
-        if batch_size <= 0:
-            raise ValueError(f"Invalid batch size: {batch_size}")
-        
-        logger.info(f"Processing {len(images)} images in batches of {batch_size}")
-        
-        all_results = []
-        for i in range(0, len(images), batch_size):
-            batch = images[i:i + batch_size]
-            batch_num = (i // batch_size) + 1
-            total_batches = (len(images) + batch_size - 1) // batch_size
-            
-            logger.info(f"Processing batch {batch_num}/{total_batches}")
-            
-            # Process each image in batch
-            batch_results = []
-            for idx, image_bytes in enumerate(batch):
+        if settings.OCR_STITCH_MAX_HEIGHT <= 0:
+            results = self._detect_many(images)
+        else:
+            strips = self._build_strips(images, settings.OCR_STITCH_MAX_HEIGHT)
+            logger.info(
+                f"Stitched {len(images)} panels into {len(strips)} strips "
+                f"(≤{settings.OCR_STITCH_MAX_HEIGHT}px) for OCR"
+            )
+            strip_results = self._detect_many([strip.image_bytes for strip in strips])
+            results = self._split_strip_results(strips, strip_results, len(images))
+
+        logger.info(f"Batch processing complete: {len(results)} images processed")
+        return results
+
+    def _detect_many(self, images: List[bytes]) -> List[List[OCRResult]]:
+        """
+        Run detect_text on each image, up to OCR_MAX_PARALLEL_REQUESTS at once.
+
+        Results are returned in input order; a failed image gets [].
+        """
+        max_workers = settings.OCR_MAX_PARALLEL_REQUESTS
+        if max_workers <= 0:
+            raise ValueError(f"Invalid OCR_MAX_PARALLEL_REQUESTS: {max_workers}")
+        max_workers = min(max_workers, len(images))
+
+        logger.info(f"Running OCR on {len(images)} images with {max_workers} parallel requests")
+
+        # Pre-sized so each result lands in its image's slot, whatever order calls finish in
+        all_results: List[List[OCRResult]] = [[] for _ in images]
+
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ocr") as pool:
+            futures = {pool.submit(self.detect_text, image_bytes): idx
+                       for idx, image_bytes in enumerate(images)}
+            for future in as_completed(futures):
+                idx = futures[future]
                 try:
-                    results = self.detect_text(image_bytes)
-                    batch_results.append(results)
-                    logger.debug(f"  Image {idx + 1}/{len(batch)}: {len(results)} detections")
+                    all_results[idx] = future.result()
+                    logger.debug(f"  Image {idx + 1}/{len(images)}: {len(all_results[idx])} detections")
                 except Exception as e:
-                    logger.error(f"  Image {idx + 1}/{len(batch)} failed: {e}")
-                    # Add empty results for failed image
-                    batch_results.append([])
-            
-            all_results.extend(batch_results)
-        
-        logger.info(f"Batch processing complete: {len(all_results)} images processed")
+                    logger.error(f"  Image {idx + 1}/{len(images)} failed: {e}")
+
         return all_results
+
+    @staticmethod
+    def _build_strips(images: List[bytes], max_height: int) -> List["_Strip"]:
+        """
+        Pack consecutive panels into strips no taller than max_height.
+
+        A panel that can't be decoded, or a strip holding a single panel
+        (e.g. one taller than max_height), is sent as the panel's original
+        bytes - identical to unstitched OCR for that panel.
+        """
+        decoded = []
+        for image_bytes in images:
+            try:
+                img = Image.open(io.BytesIO(image_bytes))
+                img.load()
+                decoded.append(img)
+            except Exception as e:
+                logger.warning(f"Can't decode image for stitching, sending it alone: {e}")
+                decoded.append(None)
+
+        # Group panel indices; undecodable panels always stand alone
+        groups: List[List[int]] = []
+        current: List[int] = []
+        current_height = 0
+        for idx, img in enumerate(decoded):
+            if img is None:
+                if current:
+                    groups.append(current)
+                groups.append([idx])
+                current, current_height = [], 0
+                continue
+            if current and current_height + img.height > max_height:
+                groups.append(current)
+                current, current_height = [], 0
+            current.append(idx)
+            current_height += img.height
+        if current:
+            groups.append(current)
+
+        strips = []
+        for group in groups:
+            if len(group) == 1:
+                idx = group[0]
+                height = decoded[idx].height if decoded[idx] is not None else 0
+                strips.append(_Strip(images[idx], [(idx, 0, height)]))
+                continue
+
+            members, y = [], 0
+            for idx in group:
+                members.append((idx, y, decoded[idx].height))
+                y += decoded[idx].height
+            canvas = Image.new("RGB", (max(decoded[i].width for i in group), y), "white")
+            for idx, offset, _ in members:
+                canvas.paste(decoded[idx].convert("RGB"), (0, offset))
+            buffer = io.BytesIO()
+            canvas.save(buffer, "JPEG", quality=settings.OCR_STITCH_JPEG_QUALITY)
+            strips.append(_Strip(buffer.getvalue(), members))
+        return strips
+
+    @staticmethod
+    def _split_strip_results(
+        strips: List["_Strip"],
+        strip_results: List[List[OCRResult]],
+        num_images: int
+    ) -> List[List[OCRResult]]:
+        """
+        Assign each word to the panel its box's vertical centre falls in, and
+        shift its box by that panel's offset into panel coordinates.
+        """
+        results: List[List[OCRResult]] = [[] for _ in range(num_images)]
+        for strip, words in zip(strips, strip_results):
+            if len(strip.members) == 1:
+                # Panel OCR'd on its own: words are already in its coordinates
+                results[strip.members[0][0]] = list(words)
+                continue
+            for word in words:
+                center_y = word.bounding_box.center_y
+                idx, offset = next(
+                    ((i, y) for i, y, h in strip.members if y <= center_y < y + h),
+                    strip.members[-1][:2]  # below the last panel's edge → last panel
+                )
+                if offset:
+                    shifted = [{"x": v["x"], "y": v["y"] - offset}
+                               for v in word.bounding_box.vertices]
+                    word = OCRResult(word.text, BoundingBox(shifted), word.confidence)
+                results[idx].append(word)
+        return results
+
+
+class _Strip:
+    """Stitched OCR input: image bytes plus where each panel sits in it."""
+
+    def __init__(self, image_bytes: bytes, members: List[tuple]):
+        self.image_bytes = image_bytes
+        self.members = members  # [(panel_index, y_offset, height), ...] top to bottom

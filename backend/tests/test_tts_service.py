@@ -256,6 +256,7 @@ async def test_generate_speech_batch_respects_rate_limit(mock_generate, tts_serv
     
     with patch('backend.services.tts.settings') as mock_settings:
         mock_settings.ELEVENLABS_MAX_PARALLEL_REQUESTS = 5
+        mock_settings.TTS_MAX_RETRIES = 0
         
         results = await tts_service.generate_speech_batch(texts)
         
@@ -338,3 +339,130 @@ def test_generate_speech_with_custom_voice_batch(mock_generate, tts_service, moc
     results = tts_service.generate_speech_batch_sync(["Test"], voice_id=custom_voice)
     
     assert results[0].voice_id == custom_voice
+
+
+# Parallelism, retries and missing-line reporting
+
+import json as _json
+import threading as _threading
+import time as _time
+
+import requests as _requests
+from elevenlabs.api.error import APIError, RateLimitError, AuthorizationError
+
+from backend.config import settings as _settings
+from backend.services import tts as _tts_module
+from backend.services.tts import _is_retryable
+
+
+@pytest.fixture
+def fast_retries(monkeypatch):
+    """Real settings with no backoff delay, so retry tests run instantly."""
+    monkeypatch.setattr(_tts_module, "RETRY_BASE_DELAY_SECONDS", 0)
+    monkeypatch.setattr(_settings, "TTS_MAX_RETRIES", 3)
+    monkeypatch.setattr(_settings, "ELEVENLABS_MAX_PARALLEL_REQUESTS", 10)
+
+
+def _flaky(failures_by_text, audio=b"audio"):
+    """generate() stand-in: raises the queued errors for a text, then succeeds."""
+    queues = {text: list(errors) for text, errors in failures_by_text.items()}
+    calls = []
+    def fake_generate(text, *args, **kwargs):
+        calls.append(text)
+        if queues.get(text):
+            raise queues[text].pop(0)
+        return audio
+    return fake_generate, calls
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("error, retry", [
+    (APIError("Too many concurrent requests", "too_many_concurrent_requests"), True),
+    (APIError("System busy", "system_busy"), True),
+    (APIError("Rate limited", "rate_limit_exceeded"), True),
+    (APIError("Server error", "503"), True),
+    (APIError("Too many requests", "429"), True),
+    (_requests.exceptions.ConnectionError("reset"), True),
+    (_requests.exceptions.Timeout("slow"), True),
+    (_json.JSONDecodeError("Expecting value", "<html>", 0), True),
+    (RateLimitError("You have 0 credits remaining", "quota_exceeded"), False),
+    (AuthorizationError("bad key", "needs_authorization"), False),
+    (APIError("Voice not found", "voice_not_found"), False),
+    (APIError("Bad request", "400"), False),
+    (ValueError("Text cannot be empty"), False),
+])
+def test_is_retryable(error, retry):
+    assert _is_retryable(error) is retry
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_retryable_error_is_retried_then_succeeds(tts_service, fast_retries, monkeypatch):
+    busy = APIError("busy", "system_busy")
+    fake, calls = _flaky({"Second": [busy, busy]})
+    monkeypatch.setattr(_tts_module, "generate", fake)
+
+    results, failed = await tts_service.generate_speech_batch_detailed(["First", "Second", "Third"])
+
+    assert [r.text for r in results] == ["First", "Second", "Third"]
+    assert failed == []
+    assert calls.count("Second") == 3
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_quota_exceeded_is_not_retried(tts_service, fast_retries, monkeypatch):
+    fake, calls = _flaky({"Second": [RateLimitError("0 credits remaining", "quota_exceeded")]})
+    monkeypatch.setattr(_tts_module, "generate", fake)
+
+    results, failed = await tts_service.generate_speech_batch_detailed(["First", "Second", "Third"])
+
+    assert failed == [2]
+    assert calls.count("Second") == 1
+    assert [r.reading_order for r in results] == [1, 3]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_gives_up_after_max_retries(tts_service, fast_retries, monkeypatch):
+    errors = [_requests.exceptions.ConnectionError("down")] * 10
+    fake, calls = _flaky({"Only": errors})
+    monkeypatch.setattr(_tts_module, "generate", fake)
+
+    results, failed = await tts_service.generate_speech_batch_detailed(["Only"])
+
+    assert results == [] and failed == [1]
+    assert calls.count("Only") == 4          # 1 attempt + 3 retries
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_batch_wrapper_still_returns_only_results(tts_service, fast_retries, monkeypatch):
+    fake, _ = _flaky({"B": [APIError("Voice not found", "voice_not_found")]})
+    monkeypatch.setattr(_tts_module, "generate", fake)
+    results = await tts_service.generate_speech_batch(["A", "B"])
+    assert [r.text for r in results] == ["A"]
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_parallelism_reaches_configured_limit(tts_service, fast_retries, monkeypatch):
+    """10 at once is reachable regardless of asyncio's default pool size."""
+    lock = _threading.Lock()
+    active, peak = [0], [0]
+    def slow_generate(text, *args, **kwargs):
+        with lock:
+            active[0] += 1
+            peak[0] = max(peak[0], active[0])
+        _time.sleep(0.05)
+        with lock:
+            active[0] -= 1
+        return b"audio"
+    monkeypatch.setattr(_tts_module, "generate", slow_generate)
+
+    start = _time.perf_counter()
+    results = await tts_service.generate_speech_batch([f"line {i}" for i in range(30)])
+
+    assert len(results) == 30
+    assert peak[0] == 10
+    assert _time.perf_counter() - start < 1.0   # 30 × 0.05s would take 1.5s one at a time

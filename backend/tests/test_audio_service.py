@@ -310,3 +310,96 @@ class TestAudioOutputFormat:
         # WAV files start with 'RIFF' header
         assert output_bytes[:4] == b'RIFF'
         assert b'WAVE' in output_bytes[:20]
+
+
+# One-pass stitching (stitch_audio_clips_with_duration)
+
+import io as _io
+
+import pytest as _pytest
+from pydub import AudioSegment as _AudioSegment
+from pydub.generators import Sine as _Sine
+
+from backend.services.audio import AudioStitcher as _AudioStitcher
+from backend.services.tts import TTSResult as _TTSResult
+
+
+def _mp3_clip(ms, freq=440, frame_rate=44100, channels=1):
+    seg = _Sine(freq, sample_rate=frame_rate).to_audio_segment(duration=ms).set_channels(channels)
+    buf = _io.BytesIO()
+    seg.export(buf, format="mp3")
+    return buf.getvalue()
+
+
+def _result(ms, order, **kw):
+    return _TTSResult(text=f"line {order}", audio_bytes=_mp3_clip(ms, **kw), reading_order=order, voice_id="v")
+
+
+def _decoded_ms(mp3_bytes):
+    return len(_AudioSegment.from_mp3(_io.BytesIO(mp3_bytes)))
+
+
+@_pytest.mark.unit
+def test_with_duration_returns_audio_and_length_including_pauses():
+    stitcher = _AudioStitcher(pause_duration_ms=500)
+    clips = [_result(1000, 1), _result(1000, 2), _result(1000, 3)]
+
+    mp3, duration_ms = stitcher.stitch_audio_clips_with_duration(clips)
+
+    # MP3 encoding adds a few ms of padding per clip, so compare with a tolerance
+    assert duration_ms == _pytest.approx(3000 + 2 * 500, abs=150)
+    assert _decoded_ms(mp3) == _pytest.approx(duration_ms, abs=100)
+
+
+@_pytest.mark.unit
+def test_with_duration_matches_old_two_pass_result():
+    """Same duration as the old stitch_audio_clips + get_total_duration_ms."""
+    stitcher = _AudioStitcher(pause_duration_ms=300)
+    clips = [_result(700, 1), _result(1200, 2)]
+    _, duration_ms = stitcher.stitch_audio_clips_with_duration(clips)
+    assert duration_ms == stitcher.get_total_duration_ms(clips)
+
+
+@_pytest.mark.unit
+def test_with_duration_orders_by_reading_order():
+    """Clips come back out of order; loud and silent clips reveal the sequence."""
+    stitcher = _AudioStitcher(pause_duration_ms=100)
+    silent = _TTSResult(text="quiet", reading_order=1, voice_id="v",
+                        audio_bytes=_AudioSegment.silent(duration=1000).export(format="mp3").read())
+    loud = _result(1000, 2)
+    mp3, _ = stitcher.stitch_audio_clips_with_duration([loud, silent])
+
+    audio = _AudioSegment.from_mp3(_io.BytesIO(mp3))
+    assert audio[:800].rms < audio[-800:].rms   # quiet clip (order 1) first
+
+
+@_pytest.mark.unit
+def test_with_duration_normalizes_mixed_formats():
+    """Clips with different sample rates / channels are converted to the first clip's format."""
+    stitcher = _AudioStitcher(pause_duration_ms=200)
+    clips = [_result(1000, 1, frame_rate=44100, channels=1),
+             _result(1000, 2, frame_rate=22050, channels=2)]
+    mp3, duration_ms = stitcher.stitch_audio_clips_with_duration(clips)
+    assert duration_ms == _pytest.approx(2200, abs=150)
+    assert _AudioSegment.from_mp3(_io.BytesIO(mp3)).frame_rate == 44100
+
+
+@_pytest.mark.unit
+def test_stitch_audio_clips_still_returns_bytes():
+    mp3 = _AudioStitcher(pause_duration_ms=100).stitch_audio_clips([_result(500, 1)])
+    assert isinstance(mp3, bytes) and _decoded_ms(mp3) > 0
+
+
+@_pytest.mark.unit
+def test_with_duration_raises_on_undecodable_clip():
+    bad = _TTSResult(text="bad", audio_bytes=b"not audio", reading_order=2, voice_id="v")
+    with _pytest.raises(Exception):
+        _AudioStitcher().stitch_audio_clips_with_duration([_result(500, 1), bad])
+
+
+@_pytest.mark.unit
+def test_with_duration_rejects_empty_and_unsupported_format():
+    with _pytest.raises(ValueError, match="empty"):
+        _AudioStitcher().stitch_audio_clips_with_duration([])
+    with _pytest.raises(ValueError, match="Unsupported"):
+        _AudioStitcher().stitch_audio_clips_with_duration([_result(500, 1)], output_format="wav")

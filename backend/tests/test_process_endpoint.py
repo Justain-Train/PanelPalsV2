@@ -7,6 +7,7 @@ Validates interactions between system components through the full pipeline.
 
 import pytest
 import io
+from PIL import Image
 from unittest.mock import Mock, patch, AsyncMock, MagicMock
 from fastapi.testclient import TestClient
 import numpy as np
@@ -27,6 +28,40 @@ def client():
     return TestClient(app)
 
 
+def _apply_real_limits(mock):
+    """
+    Give a mocked `settings` the real numeric limits the endpoint compares
+    against (a bare Mock can't be compared with an int), and turn off the
+    expressive-TTS features so these tests keep checking the original flow.
+    """
+    mock.MAX_IMAGES_PER_REQUEST = 200
+    mock.MAX_IMAGE_SIZE_MB = 10
+    mock.MAX_IMAGE_PIXELS = 40_000_000
+    mock.TTS_SENTENCE_CASE = False
+    mock.TTS_AUDIO_TAGS = False
+    return mock
+
+
+def _heuristic_classifier():
+    """
+    Stand-in classifier that keeps every bubble as dialogue, so tests of the
+    endpoint's own logic don't depend on the installed model or the formula.
+    """
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        collect_ml_data=False,
+        ml_data_collector=SimpleNamespace(output_dir="unused"),
+        split_text_bubbles=lambda bubbles, width, height, image=None: (list(bubbles), []),
+    )
+
+
+def _png_bytes(width=40, height=40):
+    """A real, tiny PNG - Pillow must be able to open uploads now."""
+    buf = io.BytesIO()
+    Image.new("RGB", (width, height), "white").save(buf, "PNG")
+    return buf.getvalue()
+
+
 @pytest.fixture
 def mock_settings():
     """Mock settings to show all services configured."""
@@ -35,6 +70,7 @@ def mock_settings():
         mock.ELEVENLABS_CONFIGURED = True
         mock.AUDIO_SAMPLE_RATE = 44100
         mock.DEBUG = False
+        _apply_real_limits(mock)
         yield mock
 
 
@@ -42,7 +78,7 @@ def mock_settings():
 def mock_image_files():
     """Create mock image files for upload."""
     # Create simple test image bytes (PNG header + minimal data)
-    image_data = b'\x89PNG\r\n\x1a\n' + b'\x00' * 100
+    image_data = _png_bytes()
     
     files = [
         ("images", ("panel1.png", io.BytesIO(image_data), "image/png")),
@@ -228,12 +264,13 @@ def test_process_chapter_success(
     # Mock settings to show configured
     mock_settings.GOOGLE_VISION_CONFIGURED = True
     mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
     mock_settings.AUDIO_SAMPLE_RATE = 44100
     mock_settings.DEBUG = False
     
     # Setup mocks
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -245,8 +282,7 @@ def test_process_chapter_success(
     mock_get_tts.return_value = mock_tts_service
     
     mock_stitcher = Mock()
-    mock_stitcher.stitch_audio_clips.return_value = mock_wav_bytes
-    mock_stitcher.get_total_duration_ms.return_value = 2000
+    mock_stitcher.stitch_audio_clips_with_duration.return_value = (mock_wav_bytes, 2000)
     mock_get_stitcher.return_value = mock_stitcher
     
     # Make request
@@ -271,7 +307,7 @@ def test_process_chapter_success(
     mock_ocr_service.detect_text_batch.assert_called_once()
     mock_grouper.group_into_bubbles.assert_called_once()
     mock_tts_service.generate_speech_batch.assert_called_once()
-    mock_stitcher.stitch_audio_clips.assert_called_once()
+    mock_stitcher.stitch_audio_clips_with_duration.assert_called_once()
 
 
 @pytest.mark.integration
@@ -287,19 +323,75 @@ def test_process_chapter_no_images(client):
 
 
 @pytest.mark.integration
-def test_process_chapter_too_many_images(client, mock_image_files):
-    """Test error when too many images provided."""
-    # Create 101 images (over the 100 limit)
-    many_files = mock_image_files * 34  # 3 * 34 = 102
-    
+def test_process_chapter_too_many_images(client, mock_image_files, mock_settings):
+    """Test error when more images than MAX_IMAGES_PER_REQUEST are provided."""
+    mock_settings.MAX_IMAGES_PER_REQUEST = 5
+    many_files = mock_image_files * 2  # 6 images
+
     response = client.post(
         "/process/chapter",
         data={"chapter_id": "test_chapter"},
         files=many_files
     )
-    
+
     assert response.status_code == 400
-    assert "Too many images" in response.json()["detail"]
+    assert "Too many images: 6. Maximum is 5 per request." == response.json()["detail"]
+
+
+def _post_one(client, data, filename="panel.png", content_type="image/png"):
+    return client.post(
+        "/process/chapter",
+        data={"chapter_id": "test_chapter"},
+        files=[("images", (filename, io.BytesIO(data), content_type))],
+    )
+
+
+@pytest.mark.integration
+@patch('backend.routers.process.get_ocr_service')
+def test_process_chapter_rejects_oversized_image(mock_get_ocr, client, mock_settings):
+    """Files over MAX_IMAGE_SIZE_MB get 413 before any OCR is paid for."""
+    mock_settings.MAX_IMAGE_SIZE_MB = 1
+    too_big = _png_bytes() + b"\x00" * (1024 * 1024 + 1)
+
+    response = _post_one(client, too_big)
+
+    assert response.status_code == 413
+    assert response.json()["detail"] == "Image 0 exceeds 1 MB"
+    mock_get_ocr.return_value.detect_text_batch.assert_not_called()
+
+
+@pytest.mark.integration
+@patch('backend.routers.process.get_ocr_service')
+def test_process_chapter_rejects_unsupported_format(mock_get_ocr, client, mock_settings):
+    """Only PNG, JPEG and WebP are accepted."""
+    buf = io.BytesIO()
+    Image.new("RGB", (10, 10)).save(buf, "GIF")
+
+    response = _post_one(client, buf.getvalue(), "panel.gif", "image/gif")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Image 0 must be PNG, JPEG or WebP (got GIF)"
+    mock_get_ocr.return_value.detect_text_batch.assert_not_called()
+
+
+@pytest.mark.integration
+def test_process_chapter_empty_image_message_not_rewrapped(client, mock_settings):
+    """An empty upload returns its own clear message, not 'Failed to read image 0: 400: ...'."""
+    response = _post_one(client, b"")
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Image 0 is empty"
+
+
+@pytest.mark.integration
+def test_process_chapter_accepts_jpeg_and_webp_uploads(client, mock_settings):
+    """JPEG and WebP pass validation (they then fail later on the mocked pipeline, not at upload)."""
+    for fmt in ("JPEG", "WEBP"):
+        buf = io.BytesIO()
+        Image.new("RGB", (10, 10), "white").save(buf, fmt)
+        detail = _post_one(client, buf.getvalue(), f"panel.{fmt.lower()}").json().get("detail", "")
+        assert "must be PNG, JPEG or WebP" not in detail
+        assert "Failed to read image" not in detail
 
 
 @pytest.mark.integration
@@ -314,6 +406,7 @@ def test_process_chapter_google_vision_not_configured(
     """Test error when Google Vision not configured."""
     mock_settings.GOOGLE_VISION_CONFIGURED = False
     mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
     
     mock_ocr_service = Mock()
     mock_get_ocr.return_value = mock_ocr_service
@@ -342,6 +435,7 @@ def test_process_chapter_elevenlabs_not_configured(
     """Test error when ElevenLabs not configured."""
     mock_settings.GOOGLE_VISION_CONFIGURED = True
     mock_settings.ELEVENLABS_CONFIGURED = False
+    _apply_real_limits(mock_settings)
     
     mock_ocr_service = Mock()
     mock_get_ocr.return_value = mock_ocr_service
@@ -372,9 +466,10 @@ def test_process_chapter_ocr_failure(
     # Mock settings to show configured
     mock_settings.GOOGLE_VISION_CONFIGURED = True
     mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
     
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(
+    mock_ocr_service.detect_text_batch = Mock(
         side_effect=Exception("Vision API error")
     )
     mock_get_ocr.return_value = mock_ocr_service
@@ -402,9 +497,10 @@ def test_process_chapter_no_text_detected(
     # Mock settings to show configured
     mock_settings.GOOGLE_VISION_CONFIGURED = True
     mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
     
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=[])
+    mock_ocr_service.detect_text_batch = Mock(return_value=[])
     mock_get_ocr.return_value = mock_ocr_service
     
     response = client.post(
@@ -430,7 +526,7 @@ def test_process_chapter_text_grouping_failure(
 ):
     """Test handling of text grouping failures."""
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -463,7 +559,7 @@ def test_process_chapter_tts_failure(
 ):
     """Test handling of TTS API failures."""
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -502,7 +598,7 @@ def test_process_chapter_tts_no_audio(
 ):
     """Test handling when TTS generates no audio."""
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -542,7 +638,7 @@ def test_process_chapter_audio_stitching_failure(
 ):
     """Test handling of audio stitching failures."""
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -554,7 +650,7 @@ def test_process_chapter_audio_stitching_failure(
     mock_get_tts.return_value = mock_tts_service
     
     mock_stitcher = Mock()
-    mock_stitcher.stitch_audio_clips.side_effect = Exception("Stitching error")
+    mock_stitcher.stitch_audio_clips_with_duration.side_effect = Exception("Stitching error")
     mock_get_stitcher.return_value = mock_stitcher
     
     response = client.post(
@@ -587,7 +683,7 @@ def test_process_chapter_with_custom_voice(
 ):
     """Test chapter processing with custom voice ID."""
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=mock_ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=mock_ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -599,8 +695,7 @@ def test_process_chapter_with_custom_voice(
     mock_get_tts.return_value = mock_tts_service
     
     mock_stitcher = Mock()
-    mock_stitcher.stitch_audio_clips.return_value = mock_wav_bytes
-    mock_stitcher.get_total_duration_ms.return_value = 2000
+    mock_stitcher.stitch_audio_clips_with_duration.return_value = (mock_wav_bytes, 2000)
     mock_get_stitcher.return_value = mock_stitcher
     
     # Make request with custom voice
@@ -674,7 +769,7 @@ def test_process_chapter_text_preprocessing(
     ]
     
     mock_ocr_service = Mock()
-    mock_ocr_service.detect_text_batch = AsyncMock(return_value=ocr_results)
+    mock_ocr_service.detect_text_batch = Mock(return_value=ocr_results)
     mock_get_ocr.return_value = mock_ocr_service
     
     mock_grouper = Mock()
@@ -688,8 +783,7 @@ def test_process_chapter_text_preprocessing(
     mock_get_tts.return_value = mock_tts_service
     
     mock_stitcher = Mock()
-    mock_stitcher.stitch_audio_clips.return_value = mock_wav_bytes
-    mock_stitcher.get_total_duration_ms.return_value = 1000
+    mock_stitcher.stitch_audio_clips_with_duration.return_value = (mock_wav_bytes, 1000)
     mock_get_stitcher.return_value = mock_stitcher
     
     response = client.post(
@@ -759,9 +853,8 @@ def test_process_chapter_pipeline_call_order(
     mock_stitcher = Mock()
     def stitcher_call(*args, **kwargs):
         call_order.append('stitcher')
-        return mock_wav_bytes
-    mock_stitcher.stitch_audio_clips = stitcher_call
-    mock_stitcher.get_total_duration_ms = Mock(return_value=2000)
+        return mock_wav_bytes, 2000
+    mock_stitcher.stitch_audio_clips_with_duration = stitcher_call
     mock_get_stitcher.return_value = mock_stitcher
     
     response = client.post(
@@ -774,3 +867,69 @@ def test_process_chapter_pipeline_call_order(
     
     # Verify correct order: OCR → Grouper → TTS → Stitcher
     assert call_order == ['ocr', 'grouper', 'tts', 'stitcher']
+
+
+@pytest.mark.integration
+@patch('backend.routers.process.get_text_box_classifier', new=_heuristic_classifier)
+@patch('backend.routers.process.get_audio_stitcher')
+@patch('backend.routers.process.get_tts_service')
+@patch('backend.routers.process.get_text_grouper')
+@patch('backend.routers.process.get_ocr_service')
+@patch('backend.routers.process.settings')
+def test_process_chapter_reports_missing_lines(
+    mock_settings, mock_get_ocr, mock_get_grouper, mock_get_tts, mock_get_stitcher,
+    mock_ocr_results, mock_text_bubbles, mock_image_files, client
+):
+    """Lines TTS couldn't produce after retries are listed in X-Missing-Lines."""
+    mock_settings.GOOGLE_VISION_CONFIGURED = True
+    mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
+    mock_settings.DEBUG = False
+
+    mock_get_ocr.return_value.detect_text_batch = Mock(return_value=mock_ocr_results)
+    mock_get_grouper.return_value.group_into_bubbles.return_value = mock_text_bubbles
+
+    # TTS only manages line 1; every later line is missing
+    only_first = [TTSResult(text="line", audio_bytes=b"mp3", reading_order=1, voice_id="v")]
+    mock_get_tts.return_value.generate_speech_batch = AsyncMock(return_value=only_first)
+    mock_get_stitcher.return_value.stitch_audio_clips_with_duration.return_value = (b"mp3", 1000)
+
+    response = client.post("/process/chapter", data={"chapter_id": "test_chapter"},
+                           files=mock_image_files)
+
+    assert response.status_code == 200
+    sent = len(mock_get_tts.return_value.generate_speech_batch.call_args[0][0])
+    assert sent > 1, "fixture should produce several TTS lines"
+    assert response.headers["x-missing-lines"] == ",".join(str(n) for n in range(2, sent + 1))
+
+
+@pytest.mark.integration
+@patch('backend.routers.process.get_text_box_classifier', new=_heuristic_classifier)
+@patch('backend.routers.process.get_audio_stitcher')
+@patch('backend.routers.process.get_tts_service')
+@patch('backend.routers.process.get_text_grouper')
+@patch('backend.routers.process.get_ocr_service')
+@patch('backend.routers.process.settings')
+def test_process_chapter_no_missing_lines_header_when_complete(
+    mock_settings, mock_get_ocr, mock_get_grouper, mock_get_tts, mock_get_stitcher,
+    mock_ocr_results, mock_text_bubbles, mock_image_files, client
+):
+    mock_settings.GOOGLE_VISION_CONFIGURED = True
+    mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
+    mock_settings.DEBUG = False
+
+    mock_get_ocr.return_value.detect_text_batch = Mock(return_value=mock_ocr_results)
+    mock_get_grouper.return_value.group_into_bubbles.return_value = mock_text_bubbles
+
+    async def all_lines(texts, voice_id=None):
+        return [TTSResult(text=t, audio_bytes=b"mp3", reading_order=i + 1, voice_id="v")
+                for i, t in enumerate(texts)]
+    mock_get_tts.return_value.generate_speech_batch = all_lines
+    mock_get_stitcher.return_value.stitch_audio_clips_with_duration.return_value = (b"mp3", 1000)
+
+    response = client.post("/process/chapter", data={"chapter_id": "test_chapter"},
+                           files=mock_image_files)
+
+    assert response.status_code == 200
+    assert "x-missing-lines" not in response.headers

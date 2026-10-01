@@ -19,6 +19,14 @@ from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+# Placeholder that survives normalize_text (letters only), used to keep
+# ellipses through TTS preprocessing - ElevenLabs uses them for pauses.
+_ELLIPSIS_TOKEN = "QQELLIPSISQQ"
+
+# Start of a sentence: beginning of text (optionally after a leading "..."),
+# after ! or ?, or after a single "." that isn't the end of an ellipsis
+_SENTENCE_START = re.compile(r'(^(?:\.{3})?|[!?]+\s+|(?<!\.)\.\s+)(["\'(]*)([a-z])')
+
 
 class TextPreprocessor:
     """
@@ -141,7 +149,7 @@ class TextPreprocessor:
         # "End.Start" → "End. Start"
         text = re.sub(r'([.!?])([A-Z])', r'\1 \2', text)
 
-        #11 get rid of * or common OCR misread
+        # 11. Remove asterisks
         text = re.sub(r'\*+', ' ', text)  # Replace multiple asterisks with space
         text = re.sub(r'(?<=[a-zA-Z])\*+(?=[a-zA-Z])', ' ', text)  # Replace asterisks between words
         
@@ -346,7 +354,7 @@ class TextPreprocessor:
         # Step 4: Remove excessive repetition (likely errors)
         text = self.remove_repeated_characters(text, max_repeats=2)
 
-        #step 5: Fix OCR corruptions like merged numbers/symbols
+        # Step 5: Fix OCR corruptions like merged numbers/symbols
         text = self.fix_ocr_corruptions(text)
         
         if text != original_text:
@@ -354,42 +362,75 @@ class TextPreprocessor:
         
         return text
     
-    def preprocess_for_tts(self, text: str) -> str:
+    def preprocess_for_tts(self, text: str, expressive: bool = False) -> str:
         """
-        Preprocess text AFTER classification, BEFORE TTS.
-        
-        Section 8.2: Text Normalization for TTS
-        Additional TTS-specific preprocessing.
-        
-        Pipeline:
-        1. Normalize text (already done in classification)
-        2. Handle numbers (convert to words if needed)
-        3. Expand abbreviations
-        4. Final cleanup
-        
+        Preprocess text before TTS.
+
         Args:
             text: Classified dialogue text
-            
+            expressive: For ElevenLabs v3/v4 - keep ellipses and stammers, and
+                convert all-caps lettering to sentence case (the models read
+                caps as shouting and use "..." for pauses). Classification
+                preprocessing is unaffected.
+
         Returns:
             Text optimized for TTS
-            
+
         Examples:
-            >>> preprocessor = TextPreprocessor()
-            >>> preprocessor.preprocess_for_tts("MEET ME @ 3PM")
-            "MEET ME at 3PM"
+            >>> TextPreprocessor().preprocess_for_tts("UGH ... IT'S FREEZING ...", expressive=True)
+            "Ugh... it's freezing..."
+            >>> TextPreprocessor().preprocess_for_tts("W - WHAT ?!", expressive=True)
+            "W-what?!"
         """
         if not text or not text.strip():
             return ""
-        
-        # Already normalized during classification, but apply again for safety
+
+        if not expressive:
+            text = self.normalize_text(text)
+            logger.debug(f"Preprocessed for TTS: '{text}'")
+            return text
+
+        # Protect ellipses and stammers from normalize_text, which turns
+        # "..." into a space and "W - WHAT" into "W WHAT"
+        text = re.sub(r'\s*(?:\.{3,}|…)\s*', f' {_ELLIPSIS_TOKEN} ', text)
+        text = re.sub(r'\b([A-Za-z])\s*-\s*(?=\1)', r'\1-', text, flags=re.IGNORECASE)
+
         text = self.normalize_text(text)
-        
-        # Additional TTS-specific processing can go here
-        # For MVP, normalization is sufficient
-        # Future: number-to-word conversion, abbreviation expansion
-        
-        logger.debug(f"Preprocessed for TTS: '{text}'")
+        text = self._restore_ellipses(text)
+
+        if self._is_all_caps(text):
+            text = self._to_sentence_case(text)
+
+        logger.debug(f"Preprocessed for TTS (expressive): '{text}'")
         return text
+
+    @staticmethod
+    def _restore_ellipses(text: str) -> str:
+        """Turn ellipsis placeholders back into '...' attached to the preceding word."""
+        text = re.sub(rf'(?:\s*{_ELLIPSIS_TOKEN})+\s*', '... ', text).strip()
+        text = re.sub(r'^\.\.\.\s+', '...', text)            # "... WAIT" → "...WAIT"
+        text = re.sub(r'\.\.\.\s+(?=[!?.,])', '...', text)   # "NO... !" → "NO...!"
+        return text
+
+    @staticmethod
+    def _is_all_caps(text: str, min_ratio: float = 0.8) -> bool:
+        """True if the lettering is (almost) all capitals, as in most webtoons."""
+        letters = [c for c in text if c.isalpha()]
+        if not letters:
+            return False
+        return sum(c.isupper() for c in letters) / len(letters) >= min_ratio
+
+    @staticmethod
+    def _to_sentence_case(text: str) -> str:
+        """
+        "I CAN'T GO ... WAIT ! YOU'RE HERE ?" → "I can't go... wait! You're here?"
+
+        Capitalizes the first letter of each sentence (an ellipsis doesn't end
+        a sentence) and the pronoun I.
+        """
+        text = text.lower()
+        text = _SENTENCE_START.sub(lambda m: m.group(1) + m.group(2) + m.group(3).upper(), text)
+        return re.sub(r'\bi\b', 'I', text)
     
     def preprocess_batch(
         self,

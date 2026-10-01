@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y \
 
 # Copy and install Python dependencies
 COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+# Into /install (not /root/.local, which the non-root runtime user can't read)
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 # Production stage
 FROM python:3.13-slim
@@ -26,10 +27,13 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder
-COPY --from=builder /root/.local /root/.local
+COPY --from=builder /install /usr/local
 
 # Copy application code
 COPY backend/ ./backend/
+
+# Trained dialogue/background classifier (see CLASSIFIER_MODE)
+COPY models/ ./models/
 
 # Create non-root user for security
 RUN useradd -m -u 1000 panelpals && \
@@ -37,8 +41,6 @@ RUN useradd -m -u 1000 panelpals && \
 
 USER panelpals
 
-# Set PATH to include user packages
-ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 

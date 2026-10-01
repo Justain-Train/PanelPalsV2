@@ -30,12 +30,12 @@ app = FastAPI(
     redoc_url="/redoc" if settings.DEBUG else None
 )
 
-# CORS Configuration (Section 5.2: Secure-by-default)
+# CORS Configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.ALLOWED_ORIGINS,
     allow_credentials=True,
-    allow_methods=["POST", "GET"],  # Restrictive: only needed methods
+    allow_methods=["POST", "GET"],
     allow_headers=["Content-Type", "Authorization"],
 )
 
@@ -64,11 +64,11 @@ async def log_requests(request: Request, call_next):
 # Security headers middleware
 @app.middleware("http")
 async def add_security_headers(request: Request, call_next):
-    """Add security headers to all responses (Section 5.2)."""
+    """Add security headers to all responses."""
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -80,13 +80,16 @@ async def health_check():
     Returns:
         dict: Service status and configuration check
     """
-    return {
+    health = {
         "status": "healthy",
         "service": "panelpals-backend",
         "version": "1.0.0",
-        "google_vision_configured": settings.GOOGLE_VISION_CONFIGURED,
-        "elevenlabs_configured": settings.ELEVENLABS_CONFIGURED
     }
+    # Which services are configured is only exposed in DEBUG
+    if settings.DEBUG:
+        health["google_vision_configured"] = settings.GOOGLE_VISION_CONFIGURED
+        health["elevenlabs_configured"] = settings.ELEVENLABS_CONFIGURED
+    return health
 
 
 @app.get("/")
