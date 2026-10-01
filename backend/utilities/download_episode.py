@@ -7,7 +7,7 @@ attribute is a lazy-load placeholder; the real image URL is in `data-url`.
 The image CDN rejects requests without a webtoons.com Referer.
 
 Usage:
-    python download_episode.py "<episode viewer url>" [--out screenshots/<name>]
+    python backend/utilities/download_episode.py "<episode viewer url>" [--out screenshots/<name>]
 
 Images are for personal testing only - don't redistribute them.
 """

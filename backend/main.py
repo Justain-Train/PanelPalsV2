@@ -68,7 +68,7 @@ async def add_security_headers(request: Request, call_next):
     response = await call_next(request)
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "DENY"
-    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "no-referrer"
     return response
 
 
@@ -80,13 +80,16 @@ async def health_check():
     Returns:
         dict: Service status and configuration check
     """
-    return {
+    health = {
         "status": "healthy",
         "service": "panelpals-backend",
         "version": "1.0.0",
-        "google_vision_configured": settings.GOOGLE_VISION_CONFIGURED,
-        "elevenlabs_configured": settings.ELEVENLABS_CONFIGURED
     }
+    # Which services are configured is only exposed in DEBUG
+    if settings.DEBUG:
+        health["google_vision_configured"] = settings.GOOGLE_VISION_CONFIGURED
+        health["elevenlabs_configured"] = settings.ELEVENLABS_CONFIGURED
+    return health
 
 
 @app.get("/")

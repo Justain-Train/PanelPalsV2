@@ -11,7 +11,7 @@ Architecture:
 - Exports ready-to-train datasets
 
 Usage:
-    python -m backend.ml.prepare_dataset ml_data/raw/collected_TIMESTAMP.csv
+    python -m backend.ml.prepare_dataset backend/ml/ml_data/raw/collected_TIMESTAMP.csv
 """
 
 import argparse
@@ -167,7 +167,7 @@ def main():
     parser.add_argument(
         "--output-dir",
         type=Path,
-        default=Path("ml_data/prepared"),
+        default=Path("backend/ml/ml_data/prepared"),
         help="Output directory for train/test datasets"
     )
     parser.add_argument(

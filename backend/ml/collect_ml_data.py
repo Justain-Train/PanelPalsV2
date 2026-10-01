@@ -8,7 +8,7 @@ TTS, so no ElevenLabs credits are used (Google Vision OCR is still called).
 Doesn't need the server running.
 
 Usage:
-    python -m backend.ml.collect_ml_data screenshots/<episode_dir> [more dirs ...] [--out-dir ml_data/raw]
+    python -m backend.ml.collect_ml_data screenshots/<episode_dir> [more dirs ...] [--out-dir backend/ml/ml_data/raw]
 
 Each directory is processed as one chapter and saved to
 <out-dir>/collected_<dir name>.csv
@@ -53,6 +53,7 @@ def collect_episode(
 
     # Fresh classifier per episode so each gets its own sample list / CSV
     classifier = TextBoxClassifier()
+    classifier.collect_ml_data = True  # collecting is this script's purpose, whatever ML_COLLECT_DATA says
     out_dir.mkdir(parents=True, exist_ok=True)
     classifier.ml_data_collector.output_dir = out_dir
 
@@ -64,8 +65,8 @@ def collect_episode(
         bubbles = grouper.group_into_bubbles(panel_ocr, panel_id=panel_idx)
         if not bubbles:
             continue
-        width, height = Image.open(io.BytesIO(image_bytes_list[panel_idx])).size
-        classifier.filter_text_bubbles(bubbles, width, height)
+        image = Image.open(io.BytesIO(image_bytes_list[panel_idx]))
+        classifier.filter_text_bubbles(bubbles, image.width, image.height, image=image)
 
     csv_path = classifier.ml_data_collector.save(filename=f"collected_{episode_dir.name}.csv")
     stats = classifier.ml_data_collector.get_stats()
@@ -79,7 +80,7 @@ def collect_episode(
 def main():
     parser = argparse.ArgumentParser(description="Collect ML data without TTS")
     parser.add_argument("dirs", nargs="+", type=Path, help="Episode directories of panel images")
-    parser.add_argument("--out-dir", type=Path, default=Path("ml_data/raw"), help="Where to save CSVs")
+    parser.add_argument("--out-dir", type=Path, default=Path("backend/ml/ml_data/raw"), help="Where to save CSVs")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")

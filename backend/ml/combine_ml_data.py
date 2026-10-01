@@ -15,7 +15,7 @@ Short texts (SIGH, HUH ?, 0 ...) legitimately recur across panels, so they're
 only dropped on an exact feature match.
 
 Usage:
-    python combine_ml_data.py ml_data/raw/a.csv ml_data/raw/b.csv ... [--out ml_data/combined/combined.csv]
+    python -m backend.ml.combine_ml_data backend/ml/ml_data/raw/a.csv backend/ml/ml_data/raw/b.csv ... [--out backend/ml/ml_data/combined/combined.csv]
 """
 
 import argparse
@@ -36,7 +36,7 @@ def series_of(path: Path) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Combine and dedupe ML CSVs")
     parser.add_argument("csvs", nargs="+", type=Path)
-    parser.add_argument("--out", type=Path, default=Path("ml_data/combined/combined.csv"))
+    parser.add_argument("--out", type=Path, default=Path("backend/ml/ml_data/combined/combined.csv"))
     args = parser.parse_args()
 
     frames = []

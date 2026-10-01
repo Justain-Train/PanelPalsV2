@@ -18,6 +18,17 @@ from unittest.mock import Mock, MagicMock
 
 from backend.main import app
 from backend.config import Settings
+from backend.security import enforce_request_limits, rate_limiter
+
+
+@pytest.fixture(autouse=True)
+def no_request_limits():
+    """Most tests aren't about auth/rate limits; test_security.py removes this override."""
+    app.dependency_overrides[enforce_request_limits] = lambda: None
+    rate_limiter.reset()
+    yield
+    app.dependency_overrides.pop(enforce_request_limits, None)
+    rate_limiter.reset()
 
 
 @pytest.fixture

@@ -7,13 +7,19 @@ Combines individual audio clips into a single MP3 file with pauses.
 
 import logging
 import io
-from typing import List, Optional
+import os
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional, Tuple
 from pydub import AudioSegment
 
 from backend.config import settings
 from backend.services.tts import TTSResult
 
 logger = logging.getLogger(__name__)
+
+# Each MP3 decode runs as its own ffmpeg process; threads just wait on it,
+# so a small pool decodes several clips at once.
+DECODE_WORKERS = min(8, os.cpu_count() or 1)
 
 
 class AudioStitchingTimeoutError(Exception):
@@ -61,51 +67,96 @@ class AudioStitcher:
             
         Returns:
             Stitched audio as bytes
-            
+
         Raises:
             ValueError: If tts_results is empty or invalid
         """
+        output_bytes, _ = self.stitch_audio_clips_with_duration(tts_results, output_format)
+        return output_bytes
+
+    def stitch_audio_clips_with_duration(
+        self,
+        tts_results: List[TTSResult],
+        output_format: str = "mp3"
+    ) -> Tuple[bytes, int]:
+        """
+        Stitch TTS clips into one MP3 and return it with its duration.
+
+        Each clip is decoded exactly once (in parallel, since every decode is
+        an ffmpeg subprocess), converted to one common format, and joined in a
+        single pass - repeated `+=` would copy the growing audio every time.
+
+        Args:
+            tts_results: List of TTSResult objects
+            output_format: Output format ('mp3' only supported currently)
+
+        Returns:
+            (stitched audio bytes, duration in milliseconds including pauses)
+
+        Raises:
+            ValueError: If tts_results is empty or the format is unsupported
+        """
         if not tts_results:
             raise ValueError("Cannot stitch empty list of TTS results")
-        
+
         if output_format != "mp3":
             raise ValueError(f"Unsupported output format: {output_format}. Only 'mp3' is supported.")
-        
+
         logger.info(f"Stitching {len(tts_results)} audio clips with {self.pause_duration_ms}ms pauses")
-        
+
         # Sort by reading order to ensure correct sequence
         sorted_results = sorted(tts_results, key=lambda r: r.reading_order)
-        
-        # Start with empty audio
-        combined_audio = AudioSegment.silent(duration=0)
-        
-        for idx, result in enumerate(sorted_results):
-            logger.info(f"Processing clip {idx + 1}/{len(sorted_results)}: order={result.reading_order}")
-            
-            # Load MP3 audio from bytes
+
+        def decode(indexed_result):
+            idx, result = indexed_result
+            logger.debug(f"Decoding clip {idx + 1}/{len(sorted_results)}: order={result.reading_order}")
             try:
-                audio_segment = AudioSegment.from_mp3(io.BytesIO(result.audio_bytes))
+                return AudioSegment.from_mp3(io.BytesIO(result.audio_bytes))
             except Exception as e:
                 logger.error(f"Failed to load audio for clip {idx + 1}: {e}")
                 raise
-            
-            # Add the audio clip
-            combined_audio += audio_segment
-            
-            # Add pause after each clip except the last one
-            if idx < len(sorted_results) - 1:
-                silence = AudioSegment.silent(duration=self.pause_duration_ms)
-                combined_audio += silence
-        
+
+        # map() keeps input order; the first decode error propagates
+        with ThreadPoolExecutor(max_workers=min(DECODE_WORKERS, len(sorted_results))) as pool:
+            segments = list(pool.map(decode, enumerate(sorted_results)))
+
+        # Common format (the first clip's) so raw frames can be joined directly
+        first = segments[0]
+        frame_rate, channels, sample_width = first.frame_rate, first.channels, first.sample_width
+
+        def normalize(segment: AudioSegment) -> AudioSegment:
+            if segment.frame_rate != frame_rate:
+                segment = segment.set_frame_rate(frame_rate)
+            if segment.channels != channels:
+                segment = segment.set_channels(channels)
+            if segment.sample_width != sample_width:
+                segment = segment.set_sample_width(sample_width)
+            return segment
+
+        silence = normalize(AudioSegment.silent(duration=self.pause_duration_ms, frame_rate=frame_rate))
+
+        parts = []
+        for idx, segment in enumerate(segments):
+            parts.append(normalize(segment).raw_data)
+            if idx < len(segments) - 1:
+                parts.append(silence.raw_data)
+
+        combined_audio = AudioSegment(
+            data=b"".join(parts),
+            sample_width=sample_width,
+            frame_rate=frame_rate,
+            channels=channels
+        )
+
         # Export to MP3 bytes
         output_buffer = io.BytesIO()
         combined_audio.export(output_buffer, format=output_format)
         output_bytes = output_buffer.getvalue()
-        
-        duration_seconds = len(combined_audio) / 1000.0  # pydub duration is in milliseconds
-        logger.info(f"Stitched audio: {len(output_bytes)} bytes, duration: {duration_seconds:.2f}s")
-        
-        return output_bytes
+
+        duration_ms = len(combined_audio)  # pydub duration is in milliseconds
+        logger.info(f"Stitched audio: {len(output_bytes)} bytes, duration: {duration_ms / 1000:.2f}s")
+
+        return output_bytes, duration_ms
     
     def stitch_audio_clips_to_file(
         self,

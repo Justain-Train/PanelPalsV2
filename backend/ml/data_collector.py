@@ -10,7 +10,7 @@ Architecture:
 - Exports to clean CSV format
 
 Usage:
-    collector = MLDataCollector(output_dir="ml_data/raw")
+    collector = MLDataCollector(output_dir="backend/ml/ml_data/raw")
     collector.collect_sample(text, features, score, bbox, panel_id, metadata)
     collector.save()
 """
@@ -41,7 +41,7 @@ class MLDataCollector:
     DIALOGUE_THRESHOLD = 0.70
     BACKGROUND_THRESHOLD = 0.45
     
-    def __init__(self, output_dir: str = "ml_data/raw"):
+    def __init__(self, output_dir: str = "backend/ml/ml_data/raw"):
         """
         Initialize ML data collector.
         
@@ -90,10 +90,10 @@ class MLDataCollector:
         # Flatten features with 'feature_' prefix for CSV columns
         feature_dict = {f"feature_{k}": v for k, v in features.items()}
         
-        # Extract bbox coordinates
+        # Extract bbox coordinates (BoundingBox exposes left/top, not x/y)
         bbox_dict = {
-            "bbox_x": bbox.x if hasattr(bbox, 'x') else 0,
-            "bbox_y": bbox.y if hasattr(bbox, 'y') else 0,
+            "bbox_x": getattr(bbox, 'left', getattr(bbox, 'x', 0)),
+            "bbox_y": getattr(bbox, 'top', getattr(bbox, 'y', 0)),
             "bbox_width": bbox.width if hasattr(bbox, 'width') else 0,
             "bbox_height": bbox.height if hasattr(bbox, 'height') else 0,
         }

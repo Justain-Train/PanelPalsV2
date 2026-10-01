@@ -11,6 +11,7 @@ import logging
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
+from backend.services.audio_tags import merge_tags
 from backend.services.text_grouping import TextBubble
 from backend.services.vision import BoundingBox
 
@@ -410,7 +411,8 @@ class BubbleContinuationDetector:
                                 bounding_box=merged_bbox,
                                 ocr_results=merged_ocr,
                                 reading_order=prev_bubble.reading_order,
-                                panel_id=curr_bubble.panel_id
+                                panel_id=curr_bubble.panel_id,
+                                audio_tags=merge_tags(prev_bubble.audio_tags, curr_bubble.audio_tags)
                             )
                             
                             # Mark this current bubble as merged

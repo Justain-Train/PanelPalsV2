@@ -8,7 +8,7 @@ Section 5.2: Secure-by-default API design.
 import os
 from typing import List
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, SecretStr
 
 
 class Settings(BaseSettings):
@@ -27,14 +27,27 @@ class Settings(BaseSettings):
         description="Path to Google Cloud credentials JSON"
     )
     GOOGLE_VISION_MAX_BATCH_SIZE: int = Field(
-        default=16,   
+        default=16,
         description="Max images per Vision API batch request"
+    )
+    OCR_MAX_PARALLEL_REQUESTS: int = Field(
+        default=10,
+        description="Max concurrent Vision API calls per chapter (OCR is network-bound)"
+    )
+    OCR_STITCH_MAX_HEIGHT: int = Field(
+        default=8000,
+        description="Stack consecutive panels into strips up to this height (px) so each "
+                    "Vision call covers several panels (~8x fewer billable units). 0 = one call per panel"
+    )
+    OCR_STITCH_JPEG_QUALITY: int = Field(
+        default=85,
+        description="JPEG quality for stitched strips (higher = bigger upload, no accuracy gain measured)"
     )
 
     # ElevenLabs API
-    ELEVENLABS_API_KEY: str = Field(
-        default="",
-        description="ElevenLabs API key"
+    ELEVENLABS_API_KEY: SecretStr = Field(
+        default=SecretStr(""),
+        description="ElevenLabs API key (masked in logs and errors)"
     )
     ELEVENLABS_VOICE_ID: str = Field(
         default="G17SuINrv2H9FC6nvetn",
@@ -42,7 +55,11 @@ class Settings(BaseSettings):
     )
     ELEVENLABS_MAX_PARALLEL_REQUESTS: int = Field(
         default=5,
-        description="Maximum parallel TTS requests to respect rate limits"
+        description="Maximum parallel TTS requests - set to your ElevenLabs plan's concurrency limit"
+    )
+    TTS_MAX_RETRIES: int = Field(
+        default=3,
+        description="Retries per clip for rate-limit / busy / 5xx / network errors (exponential backoff)"
     )
     
     # Audio Processing
@@ -91,18 +108,44 @@ class Settings(BaseSettings):
         description="Minimum model P(dialogue) to keep a bubble; below 0.5 favours keeping dialogue"
     )
 
+    # ML training data collection
+    ML_COLLECT_DATA: bool = Field(
+        default=False,
+        description="Save every classified bubble to backend/ml/ml_data/raw during requests. Off by default: "
+                    "it stores users' text and fills the training folder with unreviewed rows. "
+                    "backend.ml.collect_ml_data always collects regardless of this setting"
+    )
+
+    # Expressive TTS (ElevenLabs v3/v4)
+    TTS_SENTENCE_CASE: bool = Field(
+        default=True,
+        description="Convert all-caps bubbles to sentence case and keep ellipses (caps read as shouting)"
+    )
+    TTS_AUDIO_TAGS: bool = Field(
+        default=True,
+        description="Turn sound words (SOB, GIGGLE, SIGH...) into audio tags like [crying] on nearby dialogue"
+    )
+
     # Security & Rate Limiting
     MAX_IMAGE_SIZE_MB: int = Field(
         default=10,
         description="Maximum image upload size in megabytes"
     )
     MAX_IMAGES_PER_REQUEST: int = Field(
-        default=50,
-        description="Maximum images per batch request"
+        default=200,
+        description="Maximum images per request (a whole chapter; longest seen so far is 175 panels)"
     )
     RATE_LIMIT_PER_MINUTE: int = Field(
         default=10,
-        description="API rate limit per client per minute"
+        description="API rate limit per client per minute (0 disables)"
+    )
+    API_KEYS: List[SecretStr] = Field(
+        default=[],
+        description='Accepted X-API-Key values, as a JSON list: ["key1","key2"]. Required unless DEBUG'
+    )
+    MAX_IMAGE_PIXELS: int = Field(
+        default=40_000_000,
+        description="Max width x height per uploaded image (guards against decompression bombs)"
     )
     
     @property
@@ -114,7 +157,7 @@ class Settings(BaseSettings):
     @property
     def ELEVENLABS_CONFIGURED(self) -> bool:
         """Check if ElevenLabs API is configured."""
-        return bool(self.ELEVENLABS_API_KEY and self.ELEVENLABS_VOICE_ID)
+        return bool(self.ELEVENLABS_API_KEY.get_secret_value() and self.ELEVENLABS_VOICE_ID)
     
     class Config:
         env_file = ".env"

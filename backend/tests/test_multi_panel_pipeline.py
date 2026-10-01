@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 """
 Test the complete pipeline with multiple panels
+
+Live script: sends real images to a running server (paid API calls).
+Run it directly; pytest skips it.
 """
 import requests
 import sys
+
+if __name__ != "__main__":
+    import pytest
+    pytest.skip("live-server script - run directly", allow_module_level=True)
 
 # Configuration
 API_URL = "http://localhost:8000/process/chapter"

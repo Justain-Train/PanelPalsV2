@@ -10,7 +10,7 @@ Usage:
     uvicorn backend.main:app --reload
     
     # Then in another terminal, run:
-    python start_ml_collection.py
+    python backend/utilities/start_ml_collection.py
 """
 
 import logging
@@ -112,7 +112,7 @@ def process_test_chapter():
             logger.info(f"📊 File size: {len(response.content):,} bytes")
             
             # Check for collected data
-            ml_data_dir = Path("ml_data/raw")
+            ml_data_dir = Path("backend/ml/ml_data/raw")
             if ml_data_dir.exists():
                 csv_files = list(ml_data_dir.glob("collected_*.csv"))
                 if csv_files:
@@ -132,9 +132,9 @@ def process_test_chapter():
                     logger.info(f"   Auto-labeled background: {background_count}")
                     logger.info(f"   Needs review: {review_count} ({review_count/len(df)*100:.1f}%)")
                 else:
-                    logger.warning("⚠️  No CSV files found in ml_data/raw/")
+                    logger.warning("⚠️  No CSV files found in backend/ml/ml_data/raw/")
             else:
-                logger.warning("⚠️  ml_data/raw/ directory not created - check server logs")
+                logger.warning("⚠️  backend/ml/ml_data/raw/ directory not created - check server logs")
             
             return True
         else:
@@ -160,7 +160,7 @@ def show_next_steps(csv_path: Path):
     print("\n2️⃣  Prepare dataset for training:")
     print(f"   python -m backend.ml.prepare_dataset {csv_path}")
     print("\n3️⃣  Train ML models:")
-    print("   python -m backend.ml.train_model ml_data/prepared")
+    print("   python -m backend.ml.train_model backend/ml/ml_data/prepared")
     print("\n📚 For more info, see: ML_QUICK_START.md")
     print("=" * 80)
 
@@ -191,7 +191,7 @@ def main():
     
     if success:
         # Find latest CSV
-        ml_data_dir = Path("ml_data/raw")
+        ml_data_dir = Path("backend/ml/ml_data/raw")
         if ml_data_dir.exists():
             csv_files = list(ml_data_dir.glob("collected_*.csv"))
             if csv_files:

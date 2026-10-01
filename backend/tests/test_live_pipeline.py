@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """
-Test script to test the full pipeline 
+Test script to test the full pipeline
+
+Live script: sends a real image to a running server (paid API calls).
+Run it directly; pytest doesn't collect it.
 """
 import requests
 import sys
 from pathlib import Path
+
+__test__ = False  # keep pytest from treating test_pipeline() as a test
 
 def test_pipeline(image_path: str, chapter_id: str = "test_chapter_001"):
     """Test the /process/chapter endpoint with a real image"""

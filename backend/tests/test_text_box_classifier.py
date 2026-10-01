@@ -1011,6 +1011,7 @@ class TestMLModelIntegration:
     def test_filter_text_bubbles_batches_and_collects_both_scores(self, tmp_path):
         """Pipeline path: one prediction per panel; collector keeps heuristic score plus model_prob."""
         classifier = TextBoxClassifier(mode="model", model_path=save_model(tmp_path, FixedProbModel(0.9)))
+        classifier.collect_ml_data = True  # off by default (ML_COLLECT_DATA)
         classifier.ml_data_collector.samples.clear()
 
         bubbles = [
@@ -1025,3 +1026,34 @@ class TestMLModelIntegration:
         assert [s["model_prob"] for s in samples] == [0.9, 0.9]
         assert samples[0]["score"] < classifier.threshold   # heuristic score, not model prob
         assert samples[0]["threshold_used"] == classifier.threshold
+
+
+
+# ML data collection switch
+
+@pytest.mark.unit
+class TestMLCollectionSetting:
+
+    def _bubbles(self):
+        return [SimpleNamespace(text=o.text, bounding_box=o.bounding_box, panel_id=0)
+                for o in (sound_effect(), dialogue())]
+
+    def test_collection_off_by_default(self, monkeypatch):
+        """Requests and tests must not write unreviewed rows into backend/ml/ml_data/raw."""
+        monkeypatch.setattr(settings, "ML_COLLECT_DATA", False)
+        classifier = TextBoxClassifier()
+        classifier.ml_data_collector.samples.clear()
+        classifier.filter_text_bubbles(self._bubbles(), 1400, 2000)
+        assert classifier.collect_ml_data is False
+        assert classifier.ml_data_collector.samples == []
+
+    def test_collection_on_when_enabled(self, monkeypatch):
+        monkeypatch.setattr(settings, "ML_COLLECT_DATA", True)
+        classifier = TextBoxClassifier()
+        classifier.ml_data_collector.samples.clear()
+        classifier.filter_text_bubbles(self._bubbles(), 1400, 2000)
+        assert len(classifier.ml_data_collector.samples) == 2
+
+    def test_config_default_is_off(self):
+        from backend.config import Settings
+        assert Settings.model_fields["ML_COLLECT_DATA"].default is False

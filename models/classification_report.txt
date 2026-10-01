@@ -1,8 +1,8 @@
               precision    recall  f1-score   support
 
-  background       0.97      0.94      0.95       111
-    dialogue       0.97      0.99      0.98       235
+  background       0.96      0.95      0.96       269
+    dialogue       0.98      0.98      0.98       554
 
-    accuracy                           0.97       346
-   macro avg       0.97      0.96      0.97       346
-weighted avg       0.97      0.97      0.97       346
+    accuracy                           0.97       823
+   macro avg       0.97      0.97      0.97       823
+weighted avg       0.97      0.97      0.97       823

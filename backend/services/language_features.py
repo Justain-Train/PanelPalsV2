@@ -16,9 +16,11 @@ Features:
 import logging
 import re
 import math
-from typing import Dict, List, Tuple, Set
+from typing import Dict, List, Optional, Sequence, Tuple, Set
 from dataclasses import dataclass
 from collections import Counter
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -828,3 +830,165 @@ def handle_short_dialogue(text: str, features: Dict[str, float]) -> Dict[str, fl
 
 
     return features
+
+
+# ============================================================================
+# EXTRA FEATURES THAT DON'T DEPEND ON PUNCTUATION
+# ============================================================================
+#
+# The trained model leans heavily on punctuation, so it drops dialogue without
+# any (split one-word lines, interface values, name cards) and keeps junk that
+# happens to have some. These give it other evidence:
+#
+# - text shape:  lowercase / digit share, "label : value", repeated words,
+#                common sound-effect words
+# - layout:      where the box sits in the panel, letter size
+# - image:       brightness inside the box and in a ring around it - speech
+#                sits on a flat light bubble, sound effects on busy artwork
+# - neighbours:  is the adjacent bubble dialogue-like, close and aligned, and
+#                does the previous one end mid-sentence
+#
+# All values are plain numbers, so they flow through data collection
+# (feature_<name> CSV columns) and the model unchanged. The heuristic formula
+# only reads its own weighted features, so it is unaffected.
+
+# Hand-written list of common webtoon sound/action words. Deliberately not
+# derived from labelled data, so it can't leak labels into evaluation.
+SFX_WORDS = {
+    "BAM", "BANG", "BOOM", "POW", "WHAM", "THUD", "THUMP", "CRASH", "SLAM", "SMACK", "WHACK",
+    "THWACK", "KAPOW", "CLANG", "CLANK", "CLINK", "CLICK", "CLACK", "CLATTER", "RATTLE",
+    "CREAK", "CRACK", "CRACKLE", "CRUNCH", "SNAP", "POP", "SPLAT", "SPLASH", "SPLATTER",
+    "DRIP", "SWISH", "SWOOSH", "WHOOSH", "FWIP", "FWOOSH", "WHIP", "ZOOM",
+    "DASH", "STEP", "STOMP", "STRIDE", "TAP", "PAT", "KNOCK", "RUSTLE", "SHUFFLE", "SCRATCH",
+    "SCRIBBLE", "FLASH", "FLICKER", "BUZZ", "BZZT", "BEEP", "BOOP", "DING", "DONG", "RING",
+    "TICK", "TOCK", "HUFF", "PANT", "GASP", "GULP", "SIGH", "SNIFF", "SNIFFLE", "SOB", "HIC",
+    "MURMUR", "MUTTER", "MUMBLE", "WHISPER", "GIGGLE", "CHUCKLE", "SNICKER", "GROAN", "GRR",
+    "GRRR", "TREMBLE", "SHIVER", "SHAKE", "SHUDDER", "FLINCH", "JOLT", "TWITCH", "GRAB",
+    "GRIP", "CLENCH", "SQUEEZE", "PUSH", "SHOVE", "PULL", "LIFT", "DROP", "FLOP", "PLOP",
+    "SWING", "SLICE", "STAB", "SHING", "CHOMP", "MUNCH", "NOM", "CHEW", "SLURP", "GLANCE",
+    "STARE", "GLARE", "NOD", "BOW", "SMILE", "GRIN", "SMIRK", "BLUSH", "POUT", "WINK",
+    "TWIRL", "SPIN", "SWIRL", "JUMP", "HOP", "TUMBLE", "STAGGER", "SLUMP",
+    "SNEAK", "SCURRY", "RUSH", "BURST", "SPARK", "SIZZLE", "STEAM", "HOVER", "WAVE",
+    "SKID", "SCOOP", "SHOVEL", "FLING", "THROB", "PANG", "SQUEAL", "WHIMPER",
+    "CLAP", "BUMP", "DUN", "DUM", "CHIRP", "HOOT", "SNOOZE", "ZZZ", "ROAR",
+}
+
+TERMINAL_PUNCTUATION = re.compile(r"[.!?…]['\"”)]*\s*$")
+
+
+def text_shape_features(text: str) -> Dict[str, float]:
+    """Character and word-pattern features from the bubble text alone."""
+    letters = [c for c in text if c.isalpha()]
+    non_space = [c for c in text if not c.isspace()]
+    words = [w.upper() for w in re.findall(r"[A-Za-z]+", text)]
+    return {
+        "lower_ratio": sum(c.islower() for c in letters) / len(letters) if letters else 0.0,
+        "digit_ratio": sum(c.isdigit() for c in non_space) / len(non_space) if non_space else 0.0,
+        # "LABEL : value" style interface text (RP NEEDED : 15, TIME LIMIT : 10 MINUTES)
+        "label_colon": 1.0 if re.search(r"[A-Za-z]\s*:\s*\S", text) else 0.0,
+        # STEP STEP STEP, TAP TAP -> high
+        "repeat_ratio": 1.0 - len(set(words)) / len(words) if len(words) > 1 else 0.0,
+        "sfx_ratio": sum(w in SFX_WORDS for w in words) / len(words) if words else 0.0,
+    }
+
+
+def layout_features(
+    bbox,
+    image_width: int,
+    image_height: int,
+    word_boxes: Optional[Sequence] = None,
+) -> Dict[str, float]:
+    """Position and size of the text box within its panel."""
+    width = max(1, image_width)
+    height = max(1, image_height)
+    heights = [b.height for b in (word_boxes or []) if getattr(b, "height", 0) > 0]
+    letter_height = float(np.median(heights)) if heights else float(bbox.height)
+    return {
+        "rel_x": bbox.center_x / width,
+        "rel_y": bbox.center_y / height,
+        "rel_width": bbox.width / width,
+        # Normalised by panel width: panels are usually a fixed width, heights vary
+        "letter_height": letter_height / width,
+    }
+
+
+def image_background_features(gray: Optional[np.ndarray], bbox) -> Dict[str, float]:
+    """
+    Brightness (0-1) and its variation inside the text box and in a ring
+    around it. A flat, light ring suggests a speech bubble or caption box.
+    Returns {} when no image is available.
+    """
+    if gray is None:
+        return {}
+    img_h, img_w = gray.shape
+    left, top = max(0, int(bbox.left)), max(0, int(bbox.top))
+    right, bottom = min(img_w, int(bbox.right)), min(img_h, int(bbox.bottom))
+    if right <= left or bottom <= top:
+        return {}
+
+    margin = max(6, int(0.25 * (bottom - top)))
+    o_left, o_top = max(0, left - margin), max(0, top - margin)
+    o_right, o_bottom = min(img_w, right + margin), min(img_h, bottom + margin)
+
+    inside = gray[top:bottom, left:right]
+    outer = gray[o_top:o_bottom, o_left:o_right]
+    mask = np.ones(outer.shape, dtype=bool)
+    mask[top - o_top:bottom - o_top, left - o_left:right - o_left] = False
+    ring = outer[mask]
+    if ring.size == 0:
+        ring = inside.ravel()
+
+    return {
+        "inside_mean": float(inside.mean()),
+        "inside_std": float(inside.std()),
+        "ring_mean": float(ring.mean()),
+        "ring_std": float(ring.std()),
+    }
+
+
+def context_features(
+    texts: List[str],
+    bboxes: List,
+    scores: List[float],
+    image_width: int,
+    image_height: int,
+) -> List[Dict[str, float]]:
+    """
+    Features from the previous and next bubble in the panel (reading order).
+
+    scores are the heuristic formula scores, so these are computed the same
+    way at training time and in the live pipeline.
+    """
+    n = len(texts)
+    width, height = max(1, image_width), max(1, image_height)
+    out = []
+    for i in range(n):
+        neighbours = [j for j in (i - 1, i + 1) if 0 <= j < n]
+        if not neighbours:
+            out.append({"nb_gap": 1.0, "nb_max_score": 0.0, "prev_open": 0.0,
+                        "nb_aligned": 0.0, "panel_bubbles": float(n)})
+            continue
+        gaps, aligned = [], []
+        for j in neighbours:
+            a, b = bboxes[i], bboxes[j]
+            gap = max(0.0, max(a.top, b.top) - min(a.bottom, b.bottom))
+            gaps.append(gap / height)
+            aligned.append(1.0 - min(1.0, abs(a.center_x - b.center_x) / width))
+        prev_text = texts[i - 1].strip() if i > 0 else ""
+        prev_open = 1.0 if (prev_text and re.search(r"[A-Za-z]", prev_text)
+                            and not TERMINAL_PUNCTUATION.search(prev_text)) else 0.0
+        out.append({
+            "nb_gap": min(gaps),
+            "nb_max_score": max(scores[j] for j in neighbours),
+            "prev_open": prev_open,
+            "nb_aligned": max(aligned),
+            "panel_bubbles": float(n),
+        })
+    return out
+
+
+def to_grayscale_array(image) -> Optional[np.ndarray]:
+    """PIL image → float32 grayscale array in [0, 1], or None."""
+    if image is None:
+        return None
+    return np.asarray(image.convert("L"), dtype=np.float32) / 255.0

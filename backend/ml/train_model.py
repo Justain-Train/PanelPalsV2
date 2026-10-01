@@ -11,7 +11,7 @@ Architecture:
 - Generates feature importance analysis
 
 Usage:
-    python -m backend.ml.train_model ml_data/prepared
+    python -m backend.ml.train_model backend/ml/ml_data/prepared
 """
 
 import argparse

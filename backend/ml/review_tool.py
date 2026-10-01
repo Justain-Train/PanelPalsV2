@@ -11,7 +11,7 @@ Architecture:
 - Saves reviewed labels back to CSV
 
 Usage:
-    python -m backend.ml.review_tool ml_data/raw/collected_TIMESTAMP.csv
+    python -m backend.ml.review_tool backend/ml/ml_data/raw/collected_TIMESTAMP.csv
 """
 
 import argparse

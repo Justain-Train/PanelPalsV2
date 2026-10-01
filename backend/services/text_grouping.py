@@ -25,7 +25,8 @@ class TextBubble:
     ocr_results: List[OCRResult] = field(default_factory=list)
     reading_order: int = 0
     panel_id: int = -1  # Track which panel this bubble belongs to
-    
+    audio_tags: List[str] = field(default_factory=list)  # e.g. ["[laughs]"], applied at TTS time
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary representation."""
         return {
@@ -33,7 +34,8 @@ class TextBubble:
             "bounding_box": self.bounding_box.to_dict(),
             "reading_order": self.reading_order,
             "word_count": len(self.ocr_results),
-            "panel_id": self.panel_id
+            "panel_id": self.panel_id,
+            "audio_tags": list(self.audio_tags)
         }
 
 

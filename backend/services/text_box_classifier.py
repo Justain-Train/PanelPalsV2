@@ -18,6 +18,11 @@ from backend.config import settings
 from backend.services.vision import OCRResult
 from backend.services.text_preprocessing import TextPreprocessor
 from backend.services.language_features import (
+    text_shape_features,
+    layout_features,
+    image_background_features,
+    context_features,
+    to_grayscale_array,
     compute_dictionary_ratio,
     compute_alphabet_ratio,
     compute_word_frequency_score,
@@ -122,8 +127,8 @@ class TextBoxClassifier:
         # Initialize text preprocessor
         self.preprocessor = TextPreprocessor()
         
-        # ML data collection (always enabled for training)
-        self.collect_ml_data = True
+        # ML data collection (off unless ML_COLLECT_DATA is set; collect_ml_data.py turns it on)
+        self.collect_ml_data = settings.ML_COLLECT_DATA
         self.ml_data_collector = MLDataCollector()
 
         # ML classifier. In heuristic mode the model (if present) still runs so
@@ -231,20 +236,49 @@ class TextBoxClassifier:
             decisions.append((score, prob, is_text_box))
         return decisions
     
+    def _add_extra_features(
+        self,
+        texts: List[str],
+        bboxes: List,
+        word_boxes: List[Optional[List]],
+        features_list: List[dict],
+        image_width: int,
+        image_height: int,
+        image=None
+    ) -> None:
+        """
+        Add the punctuation-independent features (text shape, layout, image
+        background, neighbours) to each feature dict in place.
+
+        Neighbour features use the heuristic score of adjacent bubbles, so
+        they're computed identically during data collection and live.
+        """
+        gray = to_grayscale_array(image)
+        for text, bbox, words, features in zip(texts, bboxes, word_boxes, features_list):
+            features.update(text_shape_features(text))
+            features.update(layout_features(bbox, image_width, image_height, words))
+            features.update(image_background_features(gray, bbox))
+        scores = [self._compute_score(f) for f in features_list]
+        for features, extra in zip(features_list,
+                                   context_features(texts, bboxes, scores, image_width, image_height)):
+            features.update(extra)
+
     def classify_regions(
         self,
         ocr_results: List[OCRResult],
         image_width: int,
-        image_height: int
+        image_height: int,
+        image=None
     ) -> List[ClassificationResult]:
         """
         Classify all OCR regions in an image.
-        
+
         Args:
             ocr_results: List of OCR results to classify
             image_width: Width of source image (pixels)
             image_height: Height of source image (pixels)
-            
+            image: Optional PIL image of the panel, for background features
+
         Returns:
             List of classification results
         """
@@ -264,6 +298,13 @@ class TextBoxClassifier:
                 features = handle_short_dialogue(ocr.text, features)
 
             all_features.append(features)
+
+        self._add_extra_features(
+            [o.text for o in ocr_results],
+            [o.bounding_box for o in ocr_results],
+            [[o.bounding_box] for o in ocr_results],
+            all_features, image_width, image_height, image
+        )
 
         results = []
         for ocr, features, (score, prob, is_text_box) in zip(
@@ -641,24 +682,44 @@ class TextBoxClassifier:
         self,
         bubbles: List["TextBubble"],
         image_width: int,
-        image_height: int
+        image_height: int,
+        image=None
     ) -> List["TextBubble"]:
         """
         Filter text bubbles to only include dialogue/narration.
-        
+
         Removes background text like sound effects and signs.
         Uses the grouped bubble's combined text and bounding box for classification.
-        
+
         Args:
             bubbles: List of TextBubble objects
             image_width: Width of source image
             image_height: Height of source image
-            
+
         Returns:
             Filtered list containing only dialogue/narration bubbles
         """
+        kept, _ = self.split_text_bubbles(bubbles, image_width, image_height, image)
+        return kept
+
+    def split_text_bubbles(
+        self,
+        bubbles: List["TextBubble"],
+        image_width: int,
+        image_height: int,
+        image=None
+    ) -> Tuple[List["TextBubble"], List["TextBubble"]]:
+        """
+        Classify text bubbles into dialogue/narration and background.
+
+        Like filter_text_bubbles, but also returns the background bubbles so
+        callers can use them (e.g. sound words like SOB become audio tags).
+
+        Returns:
+            (dialogue bubbles, background bubbles), each in original order
+        """
         if not bubbles:
-            return []
+            return [], []
         
         image_area = image_width * image_height
         
@@ -683,7 +744,15 @@ class TextBoxClassifier:
 
             all_features.append(features)
 
+        self._add_extra_features(
+            [b.text for b in bubbles],
+            [b.bounding_box for b in bubbles],
+            [[r.bounding_box for r in getattr(b, "ocr_results", None) or []] for b in bubbles],
+            all_features, image_width, image_height, image
+        )
+
         filtered_bubbles = []
+        background_bubbles = []
         for bubble, features, (score, prob, is_text_box) in zip(
             bubbles, all_features, self._decide(all_features)
         ):
@@ -709,15 +778,16 @@ class TextBoxClassifier:
             if is_text_box:
                 filtered_bubbles.append(bubble)
             else:
+                background_bubbles.append(bubble)
                 logger.info(
                     f"Filtered background bubble: '{bubble.text[:30]}...' (score={score:.2f}{prob_str}) {features}"
                 )
-        
+
         logger.info(
             f"Filtered {len(bubbles)} bubbles → {len(filtered_bubbles)} dialogue bubbles "
-            f"({len(bubbles) - len(filtered_bubbles)} background bubbles filtered)"
-        
+            f"({len(background_bubbles)} background bubbles filtered)"
+
         )
-        
-        return filtered_bubbles
+
+        return filtered_bubbles, background_bubbles
 
