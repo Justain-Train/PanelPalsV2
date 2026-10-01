@@ -1,8 +1,17 @@
+
 # PanelPals V2 - Backend
 
 FastAPI backend that turns a Webtoon chapter (an ordered list of panel images) into a single narrated MP3.
 
 This is the **backend only**. The frontend (Chrome extension) is maintained separately.
+## Video Demo
+
+
+https://github.com/user-attachments/assets/8d07c8c5-5465-4dc8-a677-6c273b8a01dc
+
+
+
+## Architecture
 
 ## Pipeline
 
