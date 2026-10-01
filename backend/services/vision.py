@@ -29,6 +29,10 @@ ALLOWED_PUNCTUATION = set("'’\".,!?;:()-–—…*~&%$#@+/“”")
 # 1000 / 5000 / 999 / 111 don't match and are kept.
 LEADING_ZEROS = re.compile(r"^0{3,}\d*$")
 
+# Sanity limits on Vision responses
+MAX_WORD_CHARS = 100
+MAX_COORDINATE = 100_000
+
 
 def _is_allowed_char(char: str) -> bool:
     """Latin letters (incl. accented), ASCII digits, and webtoon punctuation."""
@@ -49,7 +53,7 @@ def is_noise_token(text: str) -> bool:
     - it's a number starting with 3+ zeros (000, 00005)
     """
     text = text.strip()
-    if not text:
+    if not text or len(text) > MAX_WORD_CHARS:
         return True
     if not all(_is_allowed_char(c) for c in text):
         return True
@@ -155,8 +159,9 @@ class GoogleVisionOCRService:
         Returns:
             List of {"x": int, "y": int} dictionaries
         """
+        # Clamped so a bad response can't produce absurd boxes downstream
         return [
-            {"x": vertex.x, "y": vertex.y}
+            {"x": min(max(int(vertex.x), 0), MAX_COORDINATE), "y": min(max(int(vertex.y), 0), MAX_COORDINATE)}
             for vertex in vertices
         ]
     
@@ -177,7 +182,7 @@ class GoogleVisionOCRService:
             raise ValueError("Google Vision API client not initialized")
         
         logger.debug("Calling Google Vision API TEXT_DETECTION")
-        return self.client.text_detection(image=image)
+        return self.client.text_detection(image=image, timeout=settings.EXTERNAL_API_TIMEOUT_SECONDS)
     
     def detect_text(self, image_bytes: bytes) -> List[OCRResult]:
         """
@@ -221,7 +226,13 @@ class GoogleVisionOCRService:
         # Parse results (skip first annotation which is full text)
         results = []
         noise = []
-        for annotation in response.text_annotations[1:]:
+        annotations = response.text_annotations[1:]
+        if len(annotations) > settings.OCR_MAX_WORDS_PER_IMAGE:
+            logger.warning(
+                f"Vision returned {len(annotations)} words; keeping the first {settings.OCR_MAX_WORDS_PER_IMAGE}"
+            )
+            annotations = annotations[:settings.OCR_MAX_WORDS_PER_IMAGE]
+        for annotation in annotations:
             if is_noise_token(annotation.description):
                 noise.append(annotation.description)
                 continue

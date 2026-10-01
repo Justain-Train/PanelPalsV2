@@ -13,13 +13,17 @@ from typing import List, Optional, Tuple
 from pydub import AudioSegment
 
 from backend.config import settings
-from backend.services.tts import TTSResult
+from backend.services.tts import TTSResult, is_mp3
 
 logger = logging.getLogger(__name__)
 
 # Each MP3 decode runs as its own ffmpeg process; threads just wait on it,
 # so a small pool decodes several clips at once.
 DECODE_WORKERS = min(8, os.cpu_count() or 1)
+
+# Longest clip decoded; anything past this is cut off. A long line is ~40 s, so
+# this only matters for a bad TTS response (keeps decoded PCM bounded).
+MAX_CLIP_SECONDS = 180
 
 
 class AudioStitchingTimeoutError(Exception):
@@ -110,8 +114,10 @@ class AudioStitcher:
         def decode(indexed_result):
             idx, result = indexed_result
             logger.debug(f"Decoding clip {idx + 1}/{len(sorted_results)}: order={result.reading_order}")
+            if not is_mp3(result.audio_bytes):
+                raise ValueError(f"Clip {idx + 1} is not MP3 audio")
             try:
-                return AudioSegment.from_mp3(io.BytesIO(result.audio_bytes))
+                return AudioSegment.from_file(io.BytesIO(result.audio_bytes), format="mp3", duration=MAX_CLIP_SECONDS)
             except Exception as e:
                 logger.error(f"Failed to load audio for clip {idx + 1}: {e}")
                 raise

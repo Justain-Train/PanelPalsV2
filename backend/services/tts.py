@@ -9,13 +9,13 @@ import logging
 import asyncio
 import json
 import random
+import re
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional, Tuple
 from dataclasses import dataclass
 
 import requests
-from elevenlabs import generate, Voice, VoiceSettings
-from elevenlabs.api import History
+from elevenlabs import Voice, VoiceSettings
 from elevenlabs.api.error import APIError, AuthorizationError, RateLimitError
 
 from backend.config import settings
@@ -24,6 +24,83 @@ logger = logging.getLogger(__name__)
 
 # Base delay for exponential backoff between retries (1s, 2s, 4s, ... plus jitter)
 RETRY_BASE_DELAY_SECONDS = 1.0
+
+ELEVENLABS_TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}?output_format=mp3_44100_128"
+VOICE_ID_PATTERN = re.compile(r"^[A-Za-z0-9]{1,64}$")
+MAX_TEXT_CHARS_PER_LINE = 2000
+MAX_ERROR_BODY_BYTES = 64_000
+
+
+def is_mp3(data: bytes) -> bool:
+    """MP3 files start with an ID3 tag or an MPEG frame sync."""
+    return data[:3] == b"ID3" or (len(data) > 1 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+
+
+def _read_limited(response: requests.Response, limit: int) -> bytes:
+    """Read a streamed body, failing once it passes `limit` bytes."""
+    chunks, total = [], 0
+    for chunk in response.iter_content(chunk_size=65536):
+        total += len(chunk)
+        if total > limit:
+            raise APIError(f"Response larger than {limit} bytes", "response_too_large")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _raise_api_error(response: requests.Response) -> None:
+    """Raise the SDK's error types, parsed the same way the SDK does."""
+    error = json.loads(_read_limited(response, MAX_ERROR_BODY_BYTES))  # JSONDecodeError is retryable
+    detail = error.get("detail") if isinstance(error, dict) else None
+    if isinstance(detail, dict):
+        message, status = str(detail.get("message", "")), str(detail.get("status", ""))
+    else:
+        message, status = str(error)[:500], str(response.status_code)
+    if response.status_code == 401 and status == "quota_exceeded":
+        raise RateLimitError(message)
+    if response.status_code == 401 and status == "needs_authorization":
+        raise AuthorizationError(message)
+    raise APIError(message, status)
+
+
+def generate(text: str, voice: Voice, model: str, api_key: str) -> bytes:
+    """
+    Call ElevenLabs text-to-speech and return MP3 bytes.
+
+    Used instead of the SDK's generate(), which has no timeout or size limit.
+    The response is treated as untrusted: no redirects (the API key would be
+    re-sent), bounded time and size, and it must actually be MP3 before
+    ffmpeg ever decodes it.
+    """
+    if not VOICE_ID_PATTERN.match(voice.voice_id or ""):
+        raise ValueError("Invalid ElevenLabs voice ID")
+    if len(text) > MAX_TEXT_CHARS_PER_LINE:
+        raise ValueError(f"Text longer than {MAX_TEXT_CHARS_PER_LINE} characters")
+
+    payload = {
+        "text": text,
+        "model_id": model,
+        "voice_settings": voice.settings.model_dump() if voice.settings else None,
+    }
+    with requests.post(
+        ELEVENLABS_TTS_URL.format(voice_id=voice.voice_id),
+        headers={"xi-api-key": api_key, "Accept": "audio/mpeg"},
+        json=payload,
+        timeout=(5, settings.EXTERNAL_API_TIMEOUT_SECONDS),
+        stream=True,
+        allow_redirects=False,
+    ) as response:
+        if 300 <= response.status_code < 400:
+            raise APIError("Unexpected redirect from ElevenLabs", "invalid_response")
+        if response.status_code != 200:
+            _raise_api_error(response)
+        content_type = response.headers.get("Content-Type", "")
+        if not content_type.startswith("audio/"):
+            raise APIError(f"Unexpected content type {content_type!r}", "invalid_response")
+        audio = _read_limited(response, settings.TTS_MAX_AUDIO_BYTES)
+
+    if not is_mp3(audio):
+        raise APIError("Response is not MP3 audio", "invalid_response")
+    return audio
 
 
 def _is_retryable(error: Exception) -> bool:

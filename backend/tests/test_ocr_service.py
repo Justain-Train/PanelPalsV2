@@ -390,7 +390,7 @@ def test_detect_text_batch_handles_failures(sample_vision_response):
     
     # Second image fails, the others succeed. Decided by image content rather
     # than call order, since calls run concurrently.
-    def text_detection(image):
+    def text_detection(image, **kwargs):
         if image.content == b"image2":
             raise Exception("OCR failed")
         return sample_vision_response

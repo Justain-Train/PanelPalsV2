@@ -37,6 +37,7 @@ def _apply_real_limits(mock):
     mock.MAX_IMAGES_PER_REQUEST = 200
     mock.MAX_IMAGE_SIZE_MB = 10
     mock.MAX_IMAGE_PIXELS = 40_000_000
+    mock.TTS_MAX_CHARS_PER_CHAPTER = 30_000
     mock.TTS_SENTENCE_CASE = False
     mock.TTS_AUDIO_TAGS = False
     return mock
@@ -933,3 +934,33 @@ def test_process_chapter_no_missing_lines_header_when_complete(
 
     assert response.status_code == 200
     assert "x-missing-lines" not in response.headers
+
+
+@pytest.mark.integration
+@patch('backend.routers.process.get_text_box_classifier', new=_heuristic_classifier)
+@patch('backend.routers.process.get_audio_stitcher')
+@patch('backend.routers.process.get_tts_service')
+@patch('backend.routers.process.get_text_grouper')
+@patch('backend.routers.process.get_ocr_service')
+@patch('backend.routers.process.settings')
+def test_process_chapter_refuses_tts_over_character_cap(
+    mock_settings, mock_get_ocr, mock_get_grouper, mock_get_tts, mock_get_stitcher,
+    mock_ocr_results, mock_text_bubbles, mock_image_files, client
+):
+    """Too much text (e.g. a bad OCR response) is refused before any TTS credits are spent."""
+    mock_settings.GOOGLE_VISION_CONFIGURED = True
+    mock_settings.ELEVENLABS_CONFIGURED = True
+    _apply_real_limits(mock_settings)
+    mock_settings.TTS_MAX_CHARS_PER_CHAPTER = 5
+    mock_settings.DEBUG = False
+
+    mock_get_ocr.return_value.detect_text_batch = Mock(return_value=mock_ocr_results)
+    mock_get_grouper.return_value.group_into_bubbles.return_value = mock_text_bubbles
+    mock_get_tts.return_value.generate_speech_batch = AsyncMock()
+
+    response = client.post("/process/chapter", data={"chapter_id": "test_chapter"},
+                           files=mock_image_files)
+
+    assert response.status_code == 400
+    assert "exceeds 5 characters" in response.json()["detail"]
+    mock_get_tts.return_value.generate_speech_batch.assert_not_called()

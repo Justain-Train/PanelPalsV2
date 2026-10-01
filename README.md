@@ -118,6 +118,9 @@ All settings are in `backend/config.py` and documented in `.env.example`. The mo
 | `MAX_IMAGES_PER_REQUEST` | `200` | Images per chapter request |
 | `MAX_IMAGE_SIZE_MB` / `MAX_IMAGE_PIXELS` | `10` / `40000000` | Per-image limits |
 | `RATE_LIMIT_PER_MINUTE` | `10` | Requests per client per minute (`0` disables) |
+| `EXTERNAL_API_TIMEOUT_SECONDS` | `30` | Timeout per Vision / ElevenLabs call |
+| `TTS_MAX_CHARS_PER_CHAPTER` | `30000` | Text sent to TTS per chapter (`0` disables); real chapters are under 10k |
+| `TTS_MAX_AUDIO_BYTES` / `OCR_MAX_WORDS_PER_IMAGE` | `3000000` / `3000` | Caps on provider responses |
 | `ML_COLLECT_DATA` | `false` | Save classified bubbles to `backend/ml/ml_data/raw` during requests |
 
 ## Security
@@ -129,8 +132,16 @@ All settings are in `backend/config.py` and documented in `.env.example`. The mo
 - **Errors**: clients get generic messages; details go to the server log (and the response only in `DEBUG`).
 - **Headers**: `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`; restrictive CORS (`ALLOWED_ORIGINS`).
 - **Model file**: `joblib` model files can execute code when loaded - only load models you trained.
+- **Third-party responses are untrusted** (in case Google Vision or ElevenLabs is compromised or misbehaves):
+  - Both providers have a timeout (`EXTERNAL_API_TIMEOUT_SECONDS`).
+  - ElevenLabs is called over fixed HTTPS with redirects refused (the key is never re-sent elsewhere), streamed with a size cap (`TTS_MAX_AUDIO_BYTES`), and must return `audio/*` that is actually MP3 before ffmpeg decodes it; decoding stops at 3 min per clip.
+  - Vision responses are capped (`OCR_MAX_WORDS_PER_IMAGE`), words over 100 characters or outside Latin letters/digits/punctuation are dropped, and coordinates are clamped.
+  - `TTS_MAX_CHARS_PER_CHAPTER` refuses a request before any TTS call if the text would cost more than any real chapter.
 
-Not handled in the app (do at deployment): TLS, a total request-size cap at the reverse proxy, and dependency scanning (`pip-audit`).
+Not handled in the app (do at deployment):
+- TLS, a total request-size cap at the reverse proxy, and dependency scanning (`pip-audit`); keep ffmpeg updated, since it parses provider audio.
+- Least-privilege credentials: an ElevenLabs key restricted to text-to-speech with a monthly character limit, and a dedicated Google Cloud project for Vision with a quota cap and budget alert. The service account needs no IAM roles; keep its JSON out of the image and readable only by the app user.
+- Rotate both keys if a provider reports a breach; optionally allow outbound traffic only to `api.elevenlabs.io` and `vision.googleapis.com`.
 
 ## ML classifier
 

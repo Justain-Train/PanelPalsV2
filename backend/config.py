@@ -61,6 +61,24 @@ class Settings(BaseSettings):
         default=3,
         description="Retries per clip for rate-limit / busy / 5xx / network errors (exponential backoff)"
     )
+
+    # Limits on third-party APIs (in case a provider is slow, misbehaving or compromised)
+    EXTERNAL_API_TIMEOUT_SECONDS: float = Field(
+        default=30.0,
+        description="Timeout per Google Vision / ElevenLabs call"
+    )
+    OCR_MAX_WORDS_PER_IMAGE: int = Field(
+        default=3000,
+        description="Words kept from one Vision response; extras are dropped (a stitched strip has ~300)"
+    )
+    TTS_MAX_AUDIO_BYTES: int = Field(
+        default=3_000_000,
+        description="Largest audio clip accepted from ElevenLabs (~3 min of MP3; a long line is ~40 s)"
+    )
+    TTS_MAX_CHARS_PER_CHAPTER: int = Field(
+        default=30_000,
+        description="Max characters sent to TTS per chapter (caps credit spend; real chapters are under 10k). 0 disables"
+    )
     
     # Audio Processing
     AUDIO_PAUSE_DURATION_MS: int = Field(

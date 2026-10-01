@@ -25,7 +25,7 @@ numpy==2.2.4
 
 # Security & Utilities
 python-dotenv==1.0.0
-slowapi==0.1.9  # Rate limiting
+requests==2.32.5  # ElevenLabs error handling, episode downloader
 
 # Testing (Section 14: Testing Strategy)
 pytest==7.4.4

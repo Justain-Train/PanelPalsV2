@@ -401,6 +401,15 @@ async def process_chapter(
         logger.info(f"Preprocessed {len(preprocessed_texts)} text bubbles")
         timer.lap("preprocess")
 
+        # Caps ElevenLabs spend per request, whatever OCR returned
+        total_chars = sum(len(text) for text in preprocessed_texts)
+        if 0 < settings.TTS_MAX_CHARS_PER_CHAPTER < total_chars:
+            logger.warning(f"Chapter {chapter_id} has {total_chars} characters of text; refusing TTS")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Chapter text exceeds {settings.TTS_MAX_CHARS_PER_CHAPTER} characters"
+            )
+
         
         logger.info(f"Generating TTS for {len(preprocessed_texts)} bubbles")
         try:
