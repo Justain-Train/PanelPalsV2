@@ -48,8 +48,6 @@ docker-compose up -d --build      # http://localhost:8000
 make logs                         # other targets: build, up, down, shell, test, prod-build, prod-up
 ```
 
-See [backend/docs/DOCKER_SETUP.md](backend/docs/DOCKER_SETUP.md) for details.
-
 ### Local
 
 ```bash
