@@ -37,7 +37,7 @@ Audio stitching          - one decode per clip, parallel, single-pass join
 MP3 response
 ```
 
-A 166-panel chapter takes about 40 s end to end (OCR ~3-12 s depending on upload speed, TTS ~20 s, stitching ~4 s).
+A 166-panel chapter takes about 28 s end to end (OCR ~3-12 s depending on upload speed, TTS ~15 s, stitching ~4 s).
 
 ## Setup
 
